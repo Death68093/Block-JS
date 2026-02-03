@@ -6,6 +6,12 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="stylesheet" href="style.css" />
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+  <style>
+    /* small style adapt for comment blocks (non-invasive) */
+    .node.comment { background: rgba(255,255,255,0.03); border: 1px dashed rgba(200,200,200,0.08); border-radius: 6px; min-width:120px; min-height:60px; }
+    .comment-title { padding:6px 8px; color:var(--text-dim); cursor:move; user-select:none; }
+    .comment-resize { position:absolute; right:6px; bottom:6px; width:12px; height:12px; cursor:se-resize; background:rgba(255,255,255,0.06); border-radius:3px; }
+  </style>
 </head>
 <body class="dark">
 
@@ -17,6 +23,7 @@
     <div id="controls">
       <div class="control-group">
         <button id="runBtn" class="primary"><i class="material-icons">play_arrow</i> Run</button>
+        <button id="runEditorBtn" title="Run inside editor"><i class="material-icons">play_circle</i> Run in Editor</button>
         <button id="stepBtn"><i class="material-icons">redo</i> Step</button>
         <button id="stopBtn" class="danger"><i class="material-icons">stop</i> Stop</button>
       </div>
@@ -88,6 +95,19 @@
           </div>
         </div>
         <div id="console-output"></div>
+      </section>
+
+      <!-- Export JS Panel (built-in feature) -->
+      <section class="panel export-panel" style="display:none; flex-direction: column; gap:6px; padding:6px;">
+        <div class="panel-header">
+          <h3>Export JS</h3>
+          <i class="material-icons">code</i>
+        </div>
+        <div style="padding:8px;">
+          <button id="export-js-btn" class="primary">Generate & Copy JS</button>
+          <button id="export-js-preview-btn" class="icon-btn" title="Preview in modal" style="margin-left:8px"><i class="material-icons">open_in_full</i></button>
+        </div>
+        <textarea id="export-js-textarea" style="width:100%; height:200px; background:#0f0f12; color:#eee; border:1px solid #222; border-radius:4px; padding:4px;" placeholder="Generated JS will appear here..."></textarea>
       </section>
 
       <section class="panel plugin-panel">
