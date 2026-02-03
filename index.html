@@ -10,58 +10,48 @@
 <body class="dark">
 
   <header id="topbar">
-    <div class="brand"><strong>TITAN</strong><span>Logic Engine</span></div>
+    <div class="brand">
+      <i class="material-icons">schema</i>
+      <strong>TITAN</strong><span>Logic Engine</span>
+    </div>
     <div id="controls">
-      <button id="runBtn" class="primary"><i class="material-icons">play_arrow</i> Run</button>
-      <button id="stopBtn"><i class="material-icons">stop</i> Stop</button>
-      <button id="pauseBtn"><i class="material-icons">pause</i> Pause</button>
-      <button id="stepBtn"><i class="material-icons">redo</i> Step</button>
+      <div class="control-group">
+        <button id="runBtn" class="primary"><i class="material-icons">play_arrow</i> Run</button>
+        <button id="stepBtn"><i class="material-icons">redo</i> Step</button>
+        <button id="stopBtn" class="danger"><i class="material-icons">stop</i> Stop</button>
+      </div>
       <span class="divider"></span>
-      <button id="saveBtn">Save</button>
-      <button id="exportProjectBtn">Export JSON</button>
-      <button id="themeBtn"><i class="material-icons">contrast</i></button>
+      <div class="control-group">
+        <button id="saveBtn"><i class="material-icons">save</i> Save</button>
+        <button id="loadBtn"><i class="material-icons">folder_open</i> Load</button>
+        <button id="clearBtn"><i class="material-icons">delete_sweep</i> Clear</button>
+      </div>
+      <span class="divider"></span>
+      <div class="control-group">
+        <button id="pluginBtn" title="Plugin Manager"><i class="material-icons">extension</i></button>
+        <button id="docsBtn" title="Docs"><i class="material-icons">menu_book</i></button>
+      </div>
+      <span class="divider"></span>
+      <button id="themeBtn" title="Toggle Theme"><i class="material-icons">dark_mode</i></button>
     </div>
   </header>
 
   <div id="editor-container">
+    
     <aside id="block-palette">
-      <div class="palette-scroll">
-        <h3>Components</h3>
-        <div class="block-category">
-          <h4>Events</h4>
-          <div class="block" data-type="event.start">On Start</div>
-          <div class="block" data-type="event.click">On Click</div>
-          <div class="block" data-type="event.interval">Interval</div>
-        </div>
-        <div class="block-category">
-          <h4>Logic & Flow</h4>
-          <div class="block" data-type="logic.if">If / Else</div>
-          <div class="block" data-type="cmp.eq">Equals</div>
-          <div class="block" data-type="cmp.gt">Greater Than</div>
-          <div class="block" data-type="action.wait">Wait (ms)</div>
-        </div>
-        <div class="block-category">
-          <h4>Math</h4>
-          <div class="block" data-type="math.add">Add</div>
-          <div class="block" data-type="math.sub">Subtract</div>
-          <div class="block" data-type="math.mul">Multiply</div>
-          <div class="block" data-type="math.random">Random</div>
-        </div>
-        <div class="block-category">
-          <h4>Data</h4>
-          <div class="block" data-type="var.set">Set Variable</div>
-          <div class="block" data-type="var.get">Get Variable</div>
-          <div class="block" data-type="var.const">Number</div>
-          <div class="block" data-type="text.const">String</div>
-        </div>
-        <hr />
-        <h4>Plugins</h4>
-        <textarea id="pluginCode" placeholder="Plugin script..."></textarea>
-        <button id="installPlugin" class="action-btn">Install Plugin</button>
+      <div class="search-box">
+        <i class="material-icons">search</i>
+        <input type="text" id="paletteSearch" placeholder="Search components...">
       </div>
+      <div class="palette-scroll" id="paletteContent"></div>
     </aside>
 
     <main id="workspace">
+      <div id="canvas-info">
+        <span id="zoom-indicator">100%</span>
+        <span id="coords-indicator">0, 0</span>
+      </div>
+
       <div id="canvas-viewport">
         <div id="canvasInner">
           <svg id="connections"></svg>
@@ -69,22 +59,63 @@
       </div>
     </main>
 
-    <aside id="properties">
-      <section class="prop-panel">
-        <h3>Properties</h3>
-        <div id="properties-content"><p class="empty-msg">Select a node</p></div>
+    <aside id="sidebar-right">
+      
+      <section class="panel prop-panel">
+        <div class="panel-header">
+          <h3>Properties</h3>
+          <i class="material-icons">tune</i>
+        </div>
+        <div id="properties-content">
+          <p class="empty-msg">Select a node to edit properties.</p>
+        </div>
       </section>
-      <section class="console-panel">
-        <h3>Debug Console</h3>
+
+      <section class="panel var-panel">
+        <div class="panel-header">
+          <h3>Variables</h3>
+          <button id="addVarBtn" class="icon-btn"><i class="material-icons">add</i></button>
+        </div>
+        <div id="variables-list"></div>
+      </section>
+
+      <section class="panel console-panel">
+        <div class="panel-header">
+          <h3>Execution Log</h3>
+          <div>
+            <button id="clearLogBtn" class="icon-btn"><i class="material-icons">block</i></button>
+            <button id="openRunWindowBtn" class="icon-btn" title="Open Run Window"><i class="material-icons">open_in_new</i></button>
+          </div>
+        </div>
         <div id="console-output"></div>
       </section>
+
+      <section class="panel plugin-panel">
+        <div class="panel-header">
+          <h3>Plugins</h3>
+          <div>
+            <button id="addPluginBtn" class="icon-btn" title="Add Plugin"><i class="material-icons">add</i></button>
+          </div>
+        </div>
+        <div id="plugins-list" style="padding:10px; overflow-y:auto;"></div>
+      </section>
+
     </aside>
   </div>
 
-  <footer id="bottom-panel">
-    <div class="tray-header">JavaScript Output</div>
-    <pre id="code-output">// Live code...</pre>
-  </footer>
+  <input type="file" id="fileInput" accept=".json" style="display:none" />
+
+  <div id="context-menu" class="hidden"></div>
+
+  <!-- Docs / Plugin Modal -->
+  <div id="modal-backdrop" class="hidden"></div>
+  <div id="modal" class="hidden">
+    <div id="modal-header">
+      <span id="modal-title">Docs</span>
+      <button id="modal-close" class="icon-btn"><i class="material-icons">close</i></button>
+    </div>
+    <div id="modal-body" style="padding:12px; max-height:60vh; overflow:auto; font-size:13px;"></div>
+  </div>
 
   <script src="script.js" defer></script>
 </body>
