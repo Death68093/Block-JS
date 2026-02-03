@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>LogicBuilder Titan — Pro</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="style.css" />
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+</head>
+<body class="dark">
+
+  <header id="topbar">
+    <div class="brand"><strong>TITAN</strong><span>Logic Engine</span></div>
+    <div id="controls">
+      <button id="runBtn" class="primary"><i class="material-icons">play_arrow</i> Run</button>
+      <button id="stopBtn"><i class="material-icons">stop</i> Stop</button>
+      <button id="pauseBtn"><i class="material-icons">pause</i> Pause</button>
+      <button id="stepBtn"><i class="material-icons">redo</i> Step</button>
+      <span class="divider"></span>
+      <button id="saveBtn">Save</button>
+      <button id="exportProjectBtn">Export JSON</button>
+      <button id="themeBtn"><i class="material-icons">contrast</i></button>
+    </div>
+  </header>
+
+  <div id="editor-container">
+    <aside id="block-palette">
+      <div class="palette-scroll">
+        <h3>Components</h3>
+        <div class="block-category">
+          <h4>Events</h4>
+          <div class="block" data-type="event.start">On Start</div>
+          <div class="block" data-type="event.click">On Click</div>
+          <div class="block" data-type="event.interval">Interval</div>
+        </div>
+        <div class="block-category">
+          <h4>Logic & Flow</h4>
+          <div class="block" data-type="logic.if">If / Else</div>
+          <div class="block" data-type="cmp.eq">Equals</div>
+          <div class="block" data-type="cmp.gt">Greater Than</div>
+          <div class="block" data-type="action.wait">Wait (ms)</div>
+        </div>
+        <div class="block-category">
+          <h4>Math</h4>
+          <div class="block" data-type="math.add">Add</div>
+          <div class="block" data-type="math.sub">Subtract</div>
+          <div class="block" data-type="math.mul">Multiply</div>
+          <div class="block" data-type="math.random">Random</div>
+        </div>
+        <div class="block-category">
+          <h4>Data</h4>
+          <div class="block" data-type="var.set">Set Variable</div>
+          <div class="block" data-type="var.get">Get Variable</div>
+          <div class="block" data-type="var.const">Number</div>
+          <div class="block" data-type="text.const">String</div>
+        </div>
+        <hr />
+        <h4>Plugins</h4>
+        <textarea id="pluginCode" placeholder="Plugin script..."></textarea>
+        <button id="installPlugin" class="action-btn">Install Plugin</button>
+      </div>
+    </aside>
+
+    <main id="workspace">
+      <div id="canvas-viewport">
+        <div id="canvasInner">
+          <svg id="connections"></svg>
+        </div>
+      </div>
+    </main>
+
+    <aside id="properties">
+      <section class="prop-panel">
+        <h3>Properties</h3>
+        <div id="properties-content"><p class="empty-msg">Select a node</p></div>
+      </section>
+      <section class="console-panel">
+        <h3>Debug Console</h3>
+        <div id="console-output"></div>
+      </section>
+    </aside>
+  </div>
+
+  <footer id="bottom-panel">
+    <div class="tray-header">JavaScript Output</div>
+    <pre id="code-output">// Live code...</pre>
+  </footer>
+
+  <script src="script.js" defer></script>
+</body>
+</html>
