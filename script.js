@@ -1,1185 +1,553 @@
-// == Titan Editor: Updated script.js ==
-// Implements:
-// 1) Export JS for all nodes (special cases + generic fallback)
-// 2) Exec I/O auto-added to all nodes
-// 3) DOM click outputs element
-// 4) LocalStorage autosave/load
-// 5) Run in editor (no new window) option
-// 6) Improved IO labels
-// 7) var.set reflected in Variables panel (variables pulled from nodes + saved state)
-// 8) Multi-select movement
-// 9) Comment block (resizable group block)
+/* LogicBuilder Ultimate - 60+ Nodes, Fixes & Settings */
 
-// --- CONFIG & STATE ---
-const CONFIG = { gridSize: 20, snapRadius: 15, storageKey: 'titan_project_v1' };
-
-const STATE = {
-  nodes: {}, connections: [], variables: {}, transform: { x: 0, y: 0, k: 1 },
-  dragging: null, selection: [], isRunning: false, plugins: {}, timers: {}, runWindow: null, _origConsole: null, functions: {}
-};
-
-// --- DOM refs ---
-const DOM = {
-  canvas: document.getElementById('canvasInner'),
-  svg: document.getElementById('connections'),
-  viewport: document.getElementById('canvas-viewport'),
-  palette: document.getElementById('paletteContent'),
-  console: document.getElementById('console-output'),
-  props: document.getElementById('properties-content'),
-  vars: document.getElementById('variables-list'),
-  zoomInd: document.getElementById('zoom-indicator'),
-  coordsInd: document.getElementById('coords-indicator'),
-  pluginsList: document.getElementById('plugins-list'),
-  modal: document.getElementById('modal'),
-  modalBackdrop: document.getElementById('modal-backdrop'),
-  modalTitle: document.getElementById('modal-title'),
-  modalBody: document.getElementById('modal-body'),
-  contextMenu: document.getElementById('context-menu'),
-  runWindowBtn: document.getElementById('openRunWindowBtn'),
-  stepBtn: document.getElementById('stepBtn'),
-  paletteSearch: document.getElementById('paletteSearch'),
-  runBtn: document.getElementById('runBtn'),
-  runEditorBtn: document.getElementById('runEditorBtn'),
-  stopBtn: document.getElementById('stopBtn'),
-  exportBtn: document.getElementById('export-js-btn'),
-  exportPreviewBtn: document.getElementById('export-js-preview-btn'),
-  exportTextarea: document.getElementById('export-js-textarea'),
-  fileInput: document.getElementById('fileInput'),
-  saveBtn: document.getElementById('saveBtn'),
-  loadBtn: document.getElementById('loadBtn'),
-  clearBtn: document.getElementById('clearBtn'),
-  pluginBtn: document.getElementById('pluginBtn'),
-  docsBtn: document.getElementById('docsBtn'),
-  themeBtn: document.getElementById('themeBtn')
-};
-
-Object.keys(DOM).forEach(k => { if(!DOM[k]) console.warn('DOM missing:', k); });
-
-// --- Utils ---
-const uid = () => 'n_' + Math.random().toString(36).slice(2,10);
-const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
-function escapeHtml(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function isExecIO(list){ return list && list.some(i=> i.type==='exec'); }
-
-// --- Registry & automatic exec-adder ---
-// registerNode will automatically ensure an exec input and exec output exist for every node
-const REGISTRY = {};
-function ensureExecIO(arr, isInput=true){
-  arr = arr || [];
-  if(!arr.some(i => i.type === 'exec')) {
-    if(isInput) arr.unshift({ id: 'exec', type: 'exec', label: 'In' });
-    else arr.push({ id: 'exec', type: 'exec', label: 'Out' });
-  }
-  return arr;
-}
-function registerNode(type, cat, name, inputs = [], outputs = [], execFunc = null) {
-  // copy arrays to avoid mutation
-  inputs = JSON.parse(JSON.stringify(inputs || []));
-  outputs = JSON.parse(JSON.stringify(outputs || []));
-  // ensure exec present on both sides
-  inputs = ensureExecIO(inputs, true);
-  outputs = ensureExecIO(outputs, false);
-  REGISTRY[type] = { type, cat, name, inputs, outputs, execFunc };
-}
-function registerPlugin(id, meta) {
-  STATE.plugins[id] = meta || { id, name: id };
-  renderPlugins();
-}
-window.registerNode = registerNode;
-window.registerPlugin = registerPlugin;
-
-// --- Logging & run-window forwarding ---
-function forwardToRunWindow(level, msg){
-  if(!STATE.runWindow || STATE.runWindow.closed) return;
-  try {
-    const rc = STATE.runWindow.document.getElementById('run-console');
-    const line = STATE.runWindow.document.createElement('div');
-    line.className = 'log-line ' + (level === 'error' ? 'error' : (level === 'warn' ? 'warn' : 'info'));
-    line.textContent = `[${new Date().toLocaleTimeString()}] ${String(msg)}`;
-    rc.appendChild(line); rc.scrollTop = rc.scrollHeight;
-  } catch(e){}
-}
-function formatForLog(x){ try { if(typeof x === 'object') return JSON.stringify(x); return String(x); } catch(e){ return String(x); } }
-function log(msg, type='info'){ if(!DOM.console) return; const div = document.createElement('div'); div.className = 'log-line ' + type; div.textContent = `[${new Date().toLocaleTimeString()}] ${String(msg)}`; DOM.console.appendChild(div); DOM.console.scrollTop = DOM.console.scrollHeight; }
-
-// --- NODE SET (comprehensive, with exec IO auto-added by registerNode) ---
-/* Events */
-registerNode('evt.start','Events','On Start', [], [{id:'exec', type:'exec'}]);
-registerNode('evt.interval','Events','Interval', [{id:'exec',type:'exec'},{id:'ms',type:'number',val:1000}], [{id:'exec',type:'exec'}], async (ctx) => {
-  const n = ctx.node; const ms = Number(await ctx.eval('ms'))||1000;
-  if(STATE.timers[n.id]) clearInterval(STATE.timers[n.id]);
-  STATE.timers[n.id] = setInterval(()=> { try{ ctx.trigger('exec'); }catch(e){} }, ms);
-  return null;
-});
-// DOM click: improved outputs -> exec + el (element) + selector
-registerNode('evt.click','Events','On DOM Click',[{id:'exec',type:'exec'},{id:'sel',type:'string',val:'#btn'}],[{id:'exec',type:'exec'},{id:'el',type:'object'}], async (ctx)=>{
-  const sel = await ctx.eval('sel'); const n = ctx.node; const el = document.querySelector(sel);
-  if(!el) return null;
-  if(n._handler && n._handlerEl) try{ n._handlerEl.removeEventListener('click', n._handler); }catch(e){}
-  const handler = ()=> ctx.trigger('exec').catch(()=>{});
-  n._handler = handler; n._handlerEl = el; n._lastEl = el;
-  el.addEventListener('click', handler);
-  return null;
-});
-
-/* Console */
-registerNode('console.log','Console','Console Log',[{id:'exec',type:'exec'},{id:'msg',type:'any'}],[{id:'exec',type:'exec'}], async (ctx)=> { const m = await ctx.eval('msg'); log(m,'info'); forwardToRunWindow('info', m); return 'exec'; });
-registerNode('console.warn','Console','Console Warn',[{id:'exec',type:'exec'},{id:'msg',type:'any'}],[{id:'exec',type:'exec'}], async (ctx)=> { const m = await ctx.eval('msg'); log(m,'warn'); forwardToRunWindow('warn', m); return 'exec'; });
-registerNode('console.clear','Console','Console Clear',[{id:'exec',type:'exec'}],[{id:'exec',type:'exec'}], async (ctx)=> { if(DOM.console) DOM.console.innerHTML = ''; if(STATE.runWindow && !STATE.runWindow.closed) try{ STATE.runWindow.document.getElementById('run-console').innerHTML = ''; }catch(e){} return 'exec'; });
-
-/* Browser */
-registerNode('browser.alert','Browser','Alert',[{id:'exec',type:'exec'},{id:'msg',type:'string'}],[{id:'exec',type:'exec'}], async (ctx)=> { alert(await ctx.eval('msg')); return 'exec'; });
-registerNode('browser.prompt','Browser','Prompt',[{id:'exec',type:'exec'},{id:'msg',type:'string'}],[{id:'res',type:'string'},{id:'exec',type:'exec'}], async (ctx)=> prompt(await ctx.eval('msg')) || '');
-registerNode('browser.open','Browser','Open URL',[{id:'exec',type:'exec'},{id:'url',type:'string'}],[{id:'exec',type:'exec'}], async (ctx)=> { window.open(await ctx.eval('url'),'_blank'); return 'exec'; });
-
-/* Variables */
-registerNode('var.set','Variables','Set Variable',[{id:'exec',type:'exec'},{id:'name',type:'string',val:'myVar'},{id:'val',type:'any'}],[{id:'exec',type:'exec'}], async (ctx)=> {
-  const name = await ctx.eval('name'); const val = await ctx.eval('val');
-  STATE.variables[name] = val; updateVarPanel(); forwardToRunWindow('info', `var ${name} = ${JSON.stringify(val)}`); return 'exec';
-});
-registerNode('var.get','Variables','Get Variable',[{id:'exec',type:'exec'},{id:'name',type:'string',val:'myVar'}],[{id:'exec',type:'exec'},{id:'val',type:'any'}], async (ctx)=> STATE.variables[await ctx.eval('name')]);
-registerNode('var.const','Variables','Create Constant',[{id:'exec',type:'exec'},{id:'name',type:'string'},{id:'val',type:'any'}],[{id:'exec',type:'exec'}], async (ctx)=> { const name = await ctx.eval('name'); const val = await ctx.eval('val'); Object.defineProperty(STATE.variables, name, { value: val, writable:false, configurable:false, enumerable:true }); updateVarPanel(); return 'exec'; });
-
-/* Logic / Flow */
-registerNode('logic.if','Logic','If / Else',[{id:'exec',type:'exec'},{id:'cond',type:'boolean'}],[{id:'true',type:'exec',label:'Then'},{id:'false',type:'exec',label:'Else'},{id:'exec',type:'exec'}], async (ctx)=> { const cond = await ctx.eval('cond'); return cond ? 'true' : 'false'; });
-registerNode('flow.wait','Flow','Wait (ms)',[{id:'exec',type:'exec'},{id:'ms',type:'number',val:1000}],[{id:'exec',type:'exec'}], async (ctx)=> { const ms = Number(await ctx.eval('ms'))||0; await new Promise(r=>setTimeout(r,ms)); return 'exec'; });
-registerNode('flow.for','Loops','For Loop',[{id:'exec',type:'exec'},{id:'start',type:'number',val:0},{id:'end',type:'number',val:10}],[{id:'loop',type:'exec',label:'Loop'},{id:'done',type:'exec',label:'Done'},{id:'idx',type:'number'},{id:'exec',type:'exec'}], async (ctx)=> { const s=Number(await ctx.eval('start')), e=Number(await ctx.eval('end')); for(let i=s;i<e;i++){ if(!STATE.isRunning) break; ctx.setTempOutput('idx', i); await ctx.trigger('loop'); } return 'done'; });
-
-/* Arrays */
-registerNode('arr.create','Arrays','Create Array',[{id:'exec',type:'exec'}],[{id:'arr',type:'array'},{id:'exec',type:'exec'}], async (ctx)=> []);
-registerNode('arr.push','Arrays','Push',[{id:'exec',type:'exec'},{id:'arr',type:'array'},{id:'val',type:'any'}],[{id:'arr',type:'array'},{id:'exec',type:'exec'}], async (ctx)=> { const a = (await ctx.eval('arr'))||[]; a.push(await ctx.eval('val')); return a; });
-
-/* Math */
-registerNode('math.op','Math','Math Op',[{id:'exec',type:'exec'},{id:'a',type:'number'},{id:'op',type:'string',val:'+'},{id:'b',type:'number'}],[{id:'res',type:'number'},{id:'exec',type:'exec'}], async (ctx)=> { const a=Number(await ctx.eval('a')); const b=Number(await ctx.eval('b')); const op = ctx.input('op'); switch(op){case '+':return a+b;case '-':return a-b;case '*':return a*b;case '/':return a/b;case '%':return a%b;default:return 0;} });
-
-/* Strings */
-registerNode('str.join','Strings','Join',[{id:'exec',type:'exec'},{id:'a',type:'string'},{id:'sep',type:'string',val:''},{id:'b',type:'string'}],[{id:'res',type:'string'},{id:'exec',type:'exec'}], async (ctx)=> `${await ctx.eval('a')}${await ctx.eval('sep')}${await ctx.eval('b')}`);
-
-/* DOM Manipulation */
-registerNode('dom.get_by_id','DOM','Get Element by ID',[{id:'exec',type:'exec'},{id:'id',type:'string'}],[{id:'el',type:'object'},{id:'exec',type:'exec'}], async (ctx)=> document.getElementById(await ctx.eval('id')));
-registerNode('dom.set_text','DOM','Set Inner Text',[{id:'exec',type:'exec'},{id:'sel',type:'string'},{id:'text',type:'string'}],[{id:'exec',type:'exec'}], async (ctx)=> { const sel = await ctx.eval('sel'); const txt = await ctx.eval('text'); const el = document.querySelector(sel); if(!el) throw new Error('Selector not found: '+sel); el.innerText = txt; forwardToRunWindow('info', `DOM set text: ${sel}`); return 'exec'; });
-registerNode('dom.set_html','DOM','Set Inner HTML',[{id:'exec',type:'exec'},{id:'sel',type:'string'},{id:'html',type:'string'}],[{id:'exec',type:'exec'}], async (ctx)=> { const sel = await ctx.eval('sel'); const html = await ctx.eval('html'); const el = document.querySelector(sel); if(!el) throw new Error('Selector not found: '+sel); el.innerHTML = html; forwardToRunWindow('info', `DOM set html: ${sel}`); return 'exec'; });
-registerNode('dom.set_style','DOM','Set Style',[{id:'exec',type:'exec'},{id:'sel',type:'string'},{id:'prop',type:'string'},{id:'val',type:'string'}],[{id:'exec',type:'exec'}], async (ctx)=> { const sel = await ctx.eval('sel'); const prop = await ctx.eval('prop'); const val = await ctx.eval('val'); const el = document.querySelector(sel); if(!el) throw new Error('Selector not found: '+sel); el.style[prop] = val; forwardToRunWindow('info', `DOM set style: ${sel} ${prop}=${val}`); return 'exec'; });
-registerNode('dom.on','DOM','Add Event Listener',[{id:'exec',type:'exec'},{id:'sel',type:'string'},{id:'event',type:'string',val:'click'}],[{id:'exec',type:'exec'},{id:'el',type:'object'}], async (ctx)=> {
-  const sel = await ctx.eval('sel'); const ev = await ctx.eval('event'); const els = document.querySelectorAll(sel);
-  if(!els || els.length===0) return null;
-  els.forEach(el => {
-    const handler = ()=> ctx.trigger('exec').catch(()=>{});
-    el.addEventListener(ev, handler);
-    ctx.node._listeners = ctx.node._listeners || []; ctx.node._listeners.push({el, ev, handler});
-    ctx.node._lastEl = el;
-  });
-  return null;
-});
-
-/* Functions */
-registerNode('fn.define','Functions','Define Function',[{id:'exec',type:'exec'},{id:'name',type:'string'},{id:'code',type:'string'}],[{id:'exec',type:'exec'}], async (ctx)=> { const name = await ctx.eval('name'); const code = await ctx.eval('code'); STATE.functions = STATE.functions || {}; STATE.functions[name] = code; return 'exec'; });
-registerNode('fn.call','Functions','Call Function',[{id:'exec',type:'exec'},{id:'name',type:'string'},{id:'args',type:'array'}],[{id:'res',type:'any'},{id:'exec',type:'exec'}], async (ctx)=> { const name = await ctx.eval('name'); const args = await ctx.eval('args')||[]; const code = STATE.functions && STATE.functions[name]; if(!code) throw new Error('Function not found: '+name); const fn = new Function('args','state','log','return ('+code+')(args,state,log);'); const res = fn(args, STATE, (m)=>{ log('[fn] '+m,'info'); forwardToRunWindow('info','[fn] '+m); }); return res; });
-
-/* Literals */
-registerNode('data.string','Literals','String Literal',[{id:'exec',type:'exec'},{id:'val',type:'string',val:''}],[{id:'val',type:'string'},{id:'exec',type:'exec'}], (ctx)=> ctx.input('val'));
-registerNode('data.number','Literals','Number Literal',[{id:'exec',type:'exec'},{id:'val',type:'number',val:0}],[{id:'val',type:'number'},{id:'exec',type:'exec'}], (ctx)=> parseFloat(ctx.input('val')));
-registerNode('comment','UI','Comment',[{id:'exec',type:'exec'},{id:'title',type:'string',val:'Comment'}],[{id:'exec',type:'exec'}], async (ctx)=> null);
-
-// --- PALETTE RENDERER & SEARCH ---
-function initPalette(){
-  if(!DOM.palette) return;
-  DOM.palette.innerHTML = '';
-  DOM.palette.style.overflowY = 'auto';
-  DOM.palette.style.webkitOverflowScrolling = 'touch';
-  const cats = {};
-  Object.values(REGISTRY).forEach(def => {
-    if(!cats[def.cat]) cats[def.cat] = [];
-    cats[def.cat].push(def);
-  });
-  Object.keys(cats).sort().forEach(c => {
-    const header = document.createElement('div'); header.className='category-header'; header.textContent = c;
-    header.dataset.category = c.toLowerCase();
-    DOM.palette.appendChild(header);
-    cats[c].forEach(def => {
-      const el = document.createElement('div'); el.className='palette-block';
-      el.innerHTML = `<i class="material-icons" style="font-size:14px">extension</i> ${def.name} <span class="meta">${def.type}</span>`;
-      el.dataset.type = def.type; el.dataset.name = def.name.toLowerCase(); el.dataset.cat = c.toLowerCase();
-      el.draggable = true;
-      el.ondragstart = (e)=> e.dataTransfer.setData('type', def.type);
-      el.ondblclick = ()=> {
-        const rect = DOM.viewport.getBoundingClientRect();
-        const vx = (rect.width/2 - STATE.transform.x)/STATE.transform.k;
-        const vy = (rect.height/2 - STATE.transform.y)/STATE.transform.k;
-        addNode(def.type, vx, vy);
-        updateConnections();
-        saveToStorageDebounced();
-      };
-      DOM.palette.appendChild(el);
-    });
-  });
-}
-
-// filter palette search
-function filterPalette(q){
-  if(!DOM.palette) return;
-  const query = (q||'').trim().toLowerCase();
-  const blocks = DOM.palette.querySelectorAll('.palette-block');
-  const headers = DOM.palette.querySelectorAll('.category-header');
-  if(!query){ blocks.forEach(b=> b.style.display = ''); headers.forEach(h=> h.style.display = ''); return; }
-  blocks.forEach(b=>{
-    const name = b.dataset.name || '';
-    const type = b.dataset.type || '';
-    const cat = b.dataset.cat || '';
-    const match = name.includes(query) || type.includes(query) || cat.includes(query);
-    b.style.display = match ? '' : 'none';
-  });
-  headers.forEach(h=>{
-    const cat = h.dataset.category || '';
-    let any = false;
-    DOM.palette.querySelectorAll(`.palette-block[data-cat="${cat}"]`).forEach(pb => { if(pb.style.display !== 'none') any = true; });
-    h.style.display = any ? '' : 'none';
-  });
-}
-if(DOM.paletteSearch){
-  DOM.paletteSearch.addEventListener('input', (e)=> filterPalette(e.target.value));
-  DOM.paletteSearch.addEventListener('keydown', (e)=> { if(e.key === 'Escape'){ DOM.paletteSearch.value=''; filterPalette(''); } });
-}
-
-// --- NODE CREATION & UI ---
-function addNode(type, x, y, id = null, initialData = {}){
-  const def = REGISTRY[type]; if(!def) return;
-  const nId = id || uid();
-  const nodeData = { id: nId, type, x, y, inputs: {}, outputs: {}, _meta: def, _listeners: [], _customScript: null, _customColor: null };
-  def.inputs.forEach(inp => nodeData.inputs[inp.id] = initialData[inp.id] !== undefined ? initialData[inp.id] : (inp.val !== undefined ? inp.val : ''));
-  STATE.nodes[nId] = nodeData;
-
-  // create element
-  const el = document.createElement('div');
-  el.className = 'node' + (type === 'comment' ? ' comment' : '');
-  el.id = nId;
-  el.dataset.cat = def.cat;
-  el.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
-  el.style.left = '0px'; el.style.top = '0px';
-
-  // header
-  const head = document.createElement('div'); head.className = 'node-header';
-  head.innerHTML = `<span>${def.name}</span><span class="small">${def.type}</span>`;
-  if(type === 'comment'){ // comments show title differently
-    head.innerHTML = `<div class="comment-title">${nodeData.inputs.title || def.name}</div>`;
-    head.style.cursor = 'move';
-  }
-  if(nodeData._customColor) head.style.background = nodeData._customColor;
-  el.appendChild(head);
-
-  // body area for normal nodes: sockets + inputs
-  if(type !== 'comment'){
-    const body = document.createElement('div'); body.className = 'node-body';
-    const leftCol = document.createElement('div'); leftCol.className = 'col';
-    def.inputs.forEach(inp => {
-      const row = document.createElement('div'); row.className = 'socket in';
-      row.innerHTML = `<div class="port in type-${inp.type} ${inp.type==='exec'?'exec':''}" data-port="${inp.id}" data-type="${inp.type}" title="${inp.type}"></div>`;
-      if(inp.type !== 'exec'){
-        const inputField = document.createElement('input'); inputField.className='node-input';
-        inputField.value = nodeData.inputs[inp.id];
-        inputField.dataset.node = nId; inputField.dataset.inp = inp.id; inputField.onchange = (e)=> { STATE.nodes[e.target.dataset.node].inputs[e.target.dataset.inp] = e.target.value; showProperties(nId); saveToStorageDebounced(); };
-        inputField.onmousedown = e => e.stopPropagation();
-        inputField.setAttribute('data-inp', inp.id);
-        row.appendChild(inputField);
-        const lbl = document.createElement('span'); lbl.textContent = inp.id; lbl.style.marginLeft = '6px'; row.appendChild(lbl);
-      } else {
-        const lbl = document.createElement('span'); lbl.textContent = inp.label || inp.id; row.appendChild(lbl);
-      }
-      leftCol.appendChild(row);
-    });
-
-    const rightCol = document.createElement('div'); rightCol.className='col';
-    def.outputs.forEach(out => {
-      const row = document.createElement('div'); row.className = 'socket out';
-      const lbl = document.createElement('span'); lbl.textContent = out.label || out.id; row.appendChild(lbl);
-      row.innerHTML += `<div class="port out type-${out.type} ${out.type==='exec'?'exec':''}" data-port="${out.id}" data-type="${out.type}" title="${out.type}"></div>`;
-      rightCol.appendChild(row);
-    });
-
-    body.append(leftCol, rightCol); el.appendChild(body);
-  } else {
-    // comment-specific content: allow resizing handle
-    const body = document.createElement('div'); body.style.padding = '8px';
-    const t = document.createElement('div'); t.style.color = 'var(--text)'; t.textContent = '— group —'; body.appendChild(t);
-    const resize = document.createElement('div'); resize.className = 'comment-resize';
-    el.appendChild(body); el.appendChild(resize);
-    // attach resize behavior
-    setupCommentResize(el, resize, nId);
-    // show title input in props when selected
-  }
-
-  // events
-  el.onmousedown = (e)=> {
-    // if clicking ports or inputs, don't start node drag
-    if(e.target.classList.contains('port') || e.target.tagName === 'INPUT') return;
-    // If multi selected and clicked a selected node -> start multi drag
-    startDragNode(e, nId);
-  };
-  el.onclick = (e)=> { if(STATE.dragging) return; selectNode(nId, e.shiftKey); e.stopPropagation(); };
-  el.oncontextmenu = (e)=> { e.preventDefault(); showNodeContextMenu(e.clientX, e.clientY, nId); };
-
-  DOM.canvas.appendChild(el);
-
-  // If var.set: ensure variable appears in Variables panel as default
-  if(type === 'var.set'){
-    const name = nodeData.inputs.name;
-    if(name && STATE.variables[name] === undefined){
-      try {
-        // attempt JSON parse for default val strings
-        const v = nodeData.inputs.val; try { STATE.variables[name] = JSON.parse(String(v)); } catch(_) { STATE.variables[name] = v; }
-      } catch(e){}
-      updateVarPanel();
-      saveToStorageDebounced();
+(() => {
+  // --- STATE ---
+  const LS_KEY = 'lb_ultimate_state';
+  const state = {
+    nodes: {},
+    connections: [],
+    selected: new Set(),
+    nextId: 1,
+    nodeDefs: [],
+    cam: { x: 0, y: 0, z: 1 },
+    settings: {
+      gridSnap: true,
+      theme: 'theme-cyber',
+      showGrid: true
     }
-  }
-
-  saveToStorageDebounced();
-  return nId;
-}
-
-// comment resize helper
-function setupCommentResize(el, handle, nodeId){
-  let dragging = false, sx=0, sy=0, startW=0, startH=0;
-  handle.onmousedown = (ev)=> {
-    ev.stopPropagation(); dragging=true; sx = ev.clientX; sy = ev.clientY; const r = el.getBoundingClientRect(); startW = r.width; startH = r.height; document.body.style.userSelect='none';
-    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
   };
-  function onMove(ev){
-    if(!dragging) return;
-    const dx = ev.clientX - sx, dy = ev.clientY - sy;
-    const w = Math.max(80, startW + dx), h = Math.max(50, startH + dy);
-    el.style.width = w + 'px'; el.style.height = h + 'px';
-    const n = STATE.nodes[nodeId]; if(n){ n._size = { w, h }; saveToStorageDebounced(); }
-  }
-  function onUp(){ dragging=false; document.body.style.userSelect='auto'; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); }
-}
 
-// selection
-function selectNode(id, multi = false){
-  if(!multi) { document.querySelectorAll('.node.selected').forEach(n=>n.classList.remove('selected')); STATE.selection = []; }
-  const el = document.getElementById(id);
-  if(el) {
-    el.classList.add('selected');
-    if(!STATE.selection.includes(id)) STATE.selection.push(id);
-    showProperties(id);
-    updateCanvasInfo();
-  }
-}
+  // --- DOM REFERENCES ---
+  const refs = {
+    palette: document.getElementById('paletteContent'),
+    search: document.getElementById('paletteSearch'),
+    viewport: document.getElementById('canvas-viewport'),
+    canvas: document.getElementById('canvasInner'),
+    svg: document.getElementById('connections'),
+    props: document.getElementById('properties-content'),
+    console: document.getElementById('console-output'),
+    modal: document.getElementById('modal'),
+    backdrop: document.getElementById('modal-backdrop'),
+    modalTitle: document.getElementById('modal-title'),
+    modalBody: document.getElementById('modal-body'),
+    modalBtn: document.getElementById('modal-action-btn')
+  };
 
-// --- CONNECTION DRAWING ---
-function updateConnections(){
-  if(!DOM.svg) return;
-  DOM.svg.innerHTML = '';
-  STATE.connections.forEach((conn) => {
-    const fromEl = document.getElementById(conn.from), toEl = document.getElementById(conn.to);
-    if(!fromEl || !toEl) return;
-    const p1 = getPortPos(conn.from, conn.fromPort, 'out');
-    const p2 = getPortPos(conn.to, conn.toPort, 'in');
-    const path = document.createElementNS('http://www.w3.org/2000/svg','path');
-    const dx = Math.abs(p1.x - p2.x);
-    const c1x = p1.x + dx*0.5, c2x = p2.x - dx*0.5;
-    const d = `M ${p1.x} ${p1.y} C ${c1x} ${p1.y} ${c2x} ${p2.y} ${p2.x} ${p2.y}`;
-    path.setAttribute('d', d);
-    const fromPortEl = fromEl.querySelector(`.port[data-port="${conn.fromPort}"]`);
-    const type = fromPortEl ? (fromPortEl.dataset.type || 'any') : 'any';
-    const stroke = colorByType(type);
-    path.setAttribute('stroke', stroke);
-    path.setAttribute('data-orig-stroke', stroke);
-    path.setAttribute('stroke-width','3');
-    path.setAttribute('fill','none');
-    path.classList.add('conn-line');
-    path.addEventListener('mouseenter', ()=> { path.setAttribute('stroke','#ff4d4d'); path.setAttribute('stroke-width','4'); });
-    path.addEventListener('mouseleave', ()=> { path.setAttribute('stroke', path.getAttribute('data-orig-stroke')||'#fff'); path.setAttribute('stroke-width','3'); });
-    path.addEventListener('click', ()=> { STATE.connections = STATE.connections.filter(c => c !== conn); updateConnections(); saveToStorageDebounced(); });
-    DOM.svg.appendChild(path);
+  // --- HELPER FUNCTIONS ---
+  const uid = () => 'n' + (state.nextId++).toString(36); // Base36 for cooler IDs
+  const byId = id => document.getElementById(id);
+  const create = (t, c) => { const e = document.createElement(t); if (c) e.className = c; return e; };
+  const createNS = (t, c) => { const e = document.createElementNS('http://www.w3.org/2000/svg', t); if (c) e.setAttribute('class', c); return e; };
+
+  // --- INTERACTION ENGINE (The Fix) ---
+  let interact = { mode: null, start: {}, dragData: null };
+
+  // Viewport: Handles Pan and Select (Background interactions)
+  refs.viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.node') || e.target.closest('.port')) return; // STOP if clicking node
+
+    // Pan
+    if (e.button === 1 || (e.button === 0 && e.getModifierState('Space'))) {
+      interact.mode = 'pan';
+      interact.start = { x: e.clientX, y: e.clientY, cx: state.cam.x, cy: state.cam.y };
+      refs.viewport.style.cursor = 'grabbing';
+      return;
+    }
+
+    // Select (Marquee)
+    if (e.button === 0) {
+      interact.mode = 'select';
+      interact.start = { x: e.clientX, y: e.clientY };
+      const m = create('div', 'marquee'); // CSS handles marquee styling
+      Object.assign(m.style, { position: 'absolute', border: '1px dashed var(--accent)', background: 'rgba(99,102,241,0.2)', pointerEvents: 'none' });
+      document.body.appendChild(m);
+      interact.dragData = m;
+      if (!e.shiftKey) { state.selected.clear(); refreshSelection(); }
+    }
   });
-}
 
-function getPortPos(nodeId, portId, dir) {
-  const nodeEl = document.getElementById(nodeId);
-  if(!nodeEl) return {x:0,y:0};
-  const portEl = nodeEl.querySelector(`.port.${dir}[data-port="${portId}"]`) || nodeEl.querySelector(`.port[data-port="${portId}"]`);
-  if(!portEl) {
-    // fallback: use node center
-    const rect = nodeEl.getBoundingClientRect(); const canRect = DOM.canvas.getBoundingClientRect(); const scale = STATE.transform.k;
-    return { x: (rect.left - canRect.left + rect.width/2) / scale, y: (rect.top - canRect.top + rect.height/2) / scale };
-  }
-  const rect = portEl.getBoundingClientRect();
-  const canRect = DOM.canvas.getBoundingClientRect();
-  const scale = STATE.transform.k;
-  return { x: (rect.left - canRect.left + rect.width/2) / scale, y: (rect.top - canRect.top + rect.height/2) / scale };
-}
-function colorByType(type) {
-  switch(type){
-    case 'string': return '#d500f9';
-    case 'number': return '#00e676';
-    case 'boolean': return '#ff3d00';
-    case 'object': case 'array': return '#00b0ff';
-    case 'exec': return '#ffffff';
-    default: return '#b0bec5';
-  }
-}
+  window.addEventListener('mousemove', e => {
+    if (!interact.mode) return;
+    const z = state.cam.z;
 
-// --- INTERACTION: pan/zoom/wire + marquee + multi-drag ---
-if(DOM.viewport){
-  DOM.viewport.addEventListener('mousedown', (e) => {
-    if(e.shiftKey && (e.target === DOM.viewport || e.target === DOM.canvas)) { startMarquee(e); return; }
-    if(e.target === DOM.viewport || e.target === DOM.svg) { STATE.dragging = { type: 'pan', lx: e.clientX, ly: e.clientY }; }
-  });
-  DOM.viewport.addEventListener('wheel', (e)=> { e.preventDefault(); const oldK = STATE.transform.k; const delta = -Math.sign(e.deltaY) * 0.1; STATE.transform.k = clamp(oldK + delta, 0.2, 5); updateTransform(); });
-  DOM.viewport.addEventListener('dragover', e => e.preventDefault());
-  DOM.viewport.addEventListener('drop', e => {
-    e.preventDefault();
-    const type = e.dataTransfer.getData('type'); if(!type) return;
-    const rect = DOM.viewport.getBoundingClientRect();
-    const x = (e.clientX - rect.left - STATE.transform.x) / STATE.transform.k;
-    const y = (e.clientY - rect.top - STATE.transform.y) / STATE.transform.k;
-    addNode(type, x, y);
-    updateConnections();
-    saveToStorageDebounced();
-  });
-}
-
-document.addEventListener('mousedown', (e) => {
-  if(e.target.classList && e.target.classList.contains('port') && e.target.classList.contains('out')) {
-    e.stopPropagation();
-    const nodeId = e.target.closest('.node').id;
-    const portId = e.target.dataset.port;
-    STATE.dragging = { type: 'wire', from: nodeId, port: portId };
-    const path = document.createElementNS('http://www.w3.org/2000/svg','path');
-    path.setAttribute('stroke','#fff'); path.setAttribute('stroke-width','2'); path.setAttribute('fill','none'); path.setAttribute('stroke-dasharray','5,5'); path.id = 'temp-wire';
-    DOM.svg.appendChild(path);
-  }
-});
-
-document.addEventListener('mousemove', (e) => {
-  if(!STATE.dragging) return;
-  if(STATE.dragging.type === 'pan') {
-    const dx = e.clientX - STATE.dragging.lx, dy = e.clientY - STATE.dragging.ly;
-    STATE.transform.x += dx; STATE.transform.y += dy; STATE.dragging.lx = e.clientX; STATE.dragging.ly = e.clientY; updateTransform();
-  } else if(STATE.dragging.type === 'node') {
-    // moving a SINGLE node OR multiple selection
-    if(STATE.dragging.multi && STATE.selection.length > 1){
-      const scale = STATE.transform.k;
-      const dx = (e.clientX - STATE.dragging.lx)/scale, dy = (e.clientY - STATE.dragging.ly)/scale;
-      STATE.selection.forEach(id => {
-        const node = STATE.nodes[id]; if(!node) return;
-        node.x += dx; node.y += dy;
-        const el = document.getElementById(id);
-        const sx = Math.round(node.x / CONFIG.gridSize) * CONFIG.gridSize; const sy = Math.round(node.y / CONFIG.gridSize) * CONFIG.gridSize;
-        if(el) el.style.transform = `translate(${sx}px, ${sy}px)`;
+    if (interact.mode === 'pan') {
+      state.cam.x = interact.start.cx + (e.clientX - interact.start.x);
+      state.cam.y = interact.start.cy + (e.clientY - interact.start.y);
+      updateCam();
+    }
+    else if (interact.mode === 'dragNode') {
+      const dx = (e.clientX - interact.start.x) / z;
+      const dy = (e.clientY - interact.start.y) / z;
+      state.selected.forEach(id => {
+        const init = interact.dragData[id];
+        if (init) {
+          let nx = init.x + dx;
+          let ny = init.y + dy;
+          if (state.settings.gridSnap) { nx = Math.round(nx / 20) * 20; ny = Math.round(ny / 20) * 20; }
+          state.nodes[id].x = nx;
+          state.nodes[id].y = ny;
+          const el = byId(id);
+          if (el) { el.style.left = nx + 'px'; el.style.top = ny + 'px'; }
+        }
       });
-      STATE.dragging.lx = e.clientX; STATE.dragging.ly = e.clientY; updateConnections(); updateCanvasInfo();
-    } else {
-      const node = STATE.nodes[STATE.dragging.id]; if(!node) return;
-      const scale = STATE.transform.k; const dx = (e.clientX - STATE.dragging.lx)/scale, dy = (e.clientY - STATE.dragging.ly)/scale;
-      node.x += dx; node.y += dy;
-      const sx = Math.round(node.x / CONFIG.gridSize) * CONFIG.gridSize; const sy = Math.round(node.y / CONFIG.gridSize) * CONFIG.gridSize;
-      const el = document.getElementById(STATE.dragging.id); if(el) el.style.transform = `translate(${sx}px, ${sy}px)`;
-      STATE.dragging.lx = e.clientX; STATE.dragging.ly = e.clientY; updateConnections(); updateCanvasInfo();
+      renderConnections();
     }
-  } else if(STATE.dragging.type === 'wire') {
-    const p1 = getPortPos(STATE.dragging.from, STATE.dragging.port, 'out');
-    const rect = DOM.canvas.getBoundingClientRect();
-    const mx = (e.clientX - rect.left) / STATE.transform.k, my = (e.clientY - rect.top) / STATE.transform.k;
-    const dx = Math.abs(p1.x - mx), c1x = p1.x + dx*0.5, c2x = mx - dx*0.5;
-    const d = `M ${p1.x} ${p1.y} C ${c1x} ${p1.y} ${c2x} ${my} ${mx} ${my}`;
-    const temp = document.getElementById('temp-wire'); if(temp) temp.setAttribute('d', d);
-  } else if(STATE.dragging.type === 'marquee') {
-    updateMarquee(e);
-  }
-});
+    else if (interact.mode === 'link') {
+      updateTempLink(e.clientX, e.clientY);
+    }
+    else if (interact.mode === 'select') {
+      const m = interact.dragData;
+      const x = Math.min(e.clientX, interact.start.x);
+      const y = Math.min(e.clientY, interact.start.y);
+      const w = Math.abs(e.clientX - interact.start.x);
+      const h = Math.abs(e.clientY - interact.start.y);
+      m.style.left = x + 'px'; m.style.top = y + 'px'; m.style.width = w + 'px'; m.style.height = h + 'px';
+    }
+  });
 
-document.addEventListener('mouseup', (e) => {
-  if(STATE.dragging?.type === 'wire') {
-    const target = e.target;
-    if(target.classList && target.classList.contains('port') && target.classList.contains('in')) {
-      const toNode = target.closest('.node').id; const toPort = target.dataset.port;
-      if(toNode !== STATE.dragging.from) {
-        STATE.connections = STATE.connections.filter(c => !(c.to === toNode && c.toPort === toPort));
-        STATE.connections.push({ from: STATE.dragging.from, fromPort: STATE.dragging.port, to: toNode, toPort: toPort });
-        updateConnections(); saveToStorageDebounced();
+  window.addEventListener('mouseup', e => {
+    if (!interact.mode) return;
+
+    if (interact.mode === 'link') {
+      // Drop link
+      const t = document.elementFromPoint(e.clientX, e.clientY);
+      const p = t?.closest('.port');
+      if (p && p.dataset.side === 'in') {
+        addConnection(interact.dragData.node, interact.dragData.port, p.dataset.node, p.dataset.port);
       }
+      if (byId('temp-link')) byId('temp-link').remove();
     }
-    document.getElementById('temp-wire')?.remove();
-  } else if(STATE.dragging?.type === 'marquee') {
-    finishMarquee();
-  } else if(STATE.dragging?.type === 'node'){
-    // finish node drag -> save
-    saveToStorageDebounced();
-  }
-  STATE.dragging = null;
-});
+    else if (interact.mode === 'select') {
+      interact.dragData.remove();
+      // TODO: Calculate intersection for selection
+    }
 
-// start dragging node (supports multi-select move)
-function startDragNode(e, id) {
-  // if the clicked node is selected and multiple selected -> multi move
-  const multi = STATE.selection.includes(id) && STATE.selection.length > 1;
-  if(multi) STATE.dragging = { type: 'node', multi: true, lx: e.clientX, ly: e.clientY };
-  else STATE.dragging = { type: 'node', id, lx: e.clientX, ly: e.clientY };
-  // ensure selection is updated
-  if(!STATE.selection.includes(id)) selectNode(id, false);
-}
-
-// update canvas transform
-function updateTransform() {
-  if(!DOM.canvas) return;
-  DOM.canvas.style.transform = `translate(${STATE.transform.x}px, ${STATE.transform.y}px) scale(${STATE.transform.k})`;
-  if(DOM.zoomInd) DOM.zoomInd.textContent = Math.round(STATE.transform.k * 100) + '%';
-  if(DOM.viewport){
-    DOM.viewport.style.backgroundPosition = `${STATE.transform.x}px ${STATE.transform.y}px`;
-    DOM.viewport.style.backgroundSize = `${CONFIG.gridSize * STATE.transform.k}px ${CONFIG.gridSize * STATE.transform.k}px`;
-  }
-}
-
-// --- Marquee multi-select ---
-let marqueeEl = null;
-function startMarquee(e){
-  marqueeEl = document.createElement('div');
-  marqueeEl.style.position = 'absolute';
-  marqueeEl.style.left = e.clientX + 'px';
-  marqueeEl.style.top = e.clientY + 'px';
-  marqueeEl.style.width = '0px';
-  marqueeEl.style.height = '0px';
-  marqueeEl.style.border = '1px dashed var(--accent)';
-  marqueeEl.style.background = 'rgba(0,230,118,0.06)';
-  marqueeEl.style.zIndex = 9999;
-  document.body.appendChild(marqueeEl);
-  STATE.dragging = { type: 'marquee', sx: e.clientX, sy: e.clientY };
-}
-function updateMarquee(e){
-  if(!marqueeEl || !STATE.dragging) return;
-  const sx = STATE.dragging.sx, sy = STATE.dragging.sy;
-  const x = Math.min(sx, e.clientX), y = Math.min(sy, e.clientY);
-  const w = Math.abs(e.clientX - sx), h = Math.abs(e.clientY - sy);
-  marqueeEl.style.left = x + 'px'; marqueeEl.style.top = y + 'px'; marqueeEl.style.width = w + 'px'; marqueeEl.style.height = h + 'px';
-}
-function finishMarquee(){
-  if(!marqueeEl) return;
-  const rect = marqueeEl.getBoundingClientRect();
-  document.body.removeChild(marqueeEl); marqueeEl = null;
-  const selected = [];
-  Object.values(STATE.nodes).forEach(n => {
-    const el = document.getElementById(n.id);
-    if(!el) return;
-    const r = el.getBoundingClientRect();
-    const overlap = !(r.right < rect.left || r.left > rect.right || r.bottom < rect.top || r.top > rect.bottom);
-    if(overlap) selected.push(n.id);
+    interact.mode = null;
+    interact.dragData = null;
+    refs.viewport.style.cursor = 'default';
+    saveState();
   });
-  document.querySelectorAll('.node.selected').forEach(n=>n.classList.remove('selected'));
-  STATE.selection = [];
-  selected.forEach(id => { const el = document.getElementById(id); if(el) el.classList.add('selected'); STATE.selection.push(id); });
-  if(STATE.selection.length) showProperties(STATE.selection[0]);
-  updateCanvasInfo();
-}
 
-// --- EXECUTION ENGINE ---
-// added option to run inside editor (no external window)
-let RUN_IN_EDITOR_ACTIVE = false;
-function proxyConsoleToRuntime(inEditor=false) {
-  if(STATE._origConsole) return;
-  STATE._origConsole = { log: console.log.bind(console), warn: console.warn.bind(console), error: console.error.bind(console) };
-  console.log = function(...args){ try{ STATE._origConsole.log(...args); }catch(e){} const msg = args.map(x=> formatForLog(x)).join(' '); log(msg,'info'); if(inEditor){} else forwardToRunWindow('info', msg); };
-  console.warn = function(...args){ try{ STATE._origConsole.warn(...args);}catch(e){} const msg = args.map(x=> formatForLog(x)).join(' '); log(msg,'warn'); if(inEditor){} else forwardToRunWindow('warn', msg); };
-  console.error = function(...args){ try{ STATE._origConsole.error(...args);}catch(e){} const msg = args.map(x=> formatForLog(x)).join(' '); log(msg,'error'); if(inEditor){} else forwardToRunWindow('error', msg); };
-}
-function restoreConsole() {
-  if(!STATE._origConsole) return;
-  console.log = STATE._origConsole.log; console.warn = STATE._origConsole.warn; console.error = STATE._origConsole.error;
-  STATE._origConsole = null;
-}
+  // --- NODE REGISTRY (THE BIG LIST) ---
+  const reg = (def) => state.nodeDefs.push(def);
 
-function disableRunUI(disable){
-  try { if(DOM.runBtn) DOM.runBtn.disabled = disable; if(DOM.stepBtn) DOM.stepBtn.disabled = disable; if(DOM.stopBtn) DOM.stopBtn.disabled = !disable; if(DOM.runEditorBtn) DOM.runEditorBtn.disabled = disable; } catch(e){}
-}
-
-// open run window (same as before)
-function openRunWindow(){
-  try {
-    if(STATE.runWindow && !STATE.runWindow.closed){ STATE.runWindow.focus(); return; }
-    const w = window.open('', 'titan-run', 'width=700,height=600');
-    const doc = w.document;
-    doc.open();
-    doc.write(`<!doctype html><html><head><title>Titan Runtime</title><style>
-      body{background:#0b0b0d;color:#f0f0f0;font-family:Consolas,monospace;padding:8px}
-      #run-console{height:88vh;overflow:auto;border:1px solid #222;padding:8px;background:#050506}
-      .log-line{margin-bottom:6px}
-      .log-line.warn{color:#ffb74d}
-      .log-line.error{color:#ff6b6b}
-      .log-line.info{color:#81d4fa}
-      </style></head><body>
-      <h3>Titan Run Console</h3><div id="run-console"></div>
-      </body></html>`);
-    doc.close(); STATE.runWindow = w;
-  } catch(e){ log('Could not open run window: '+(e?.message||e),'error'); }
-}
-
-// runEngine accepts flag whether to open run window (default true)
-async function runEngine(openWindow = true, inEditor = false){
-  if(STATE.isRunning) return;
-  disableRunUI(true);
-  if(openWindow) openRunWindow();
-  proxyConsoleToRuntime(inEditor);
-  STATE.isRunning = true;
-  RUN_IN_EDITOR_ACTIVE = inEditor;
-  log('--- Execution Started ---','info');
-  document.querySelectorAll('.node').forEach(n=>n.classList.remove('error','running'));
-
-  const starts = Object.values(STATE.nodes).filter(n => n.type === 'evt.start');
-  try {
-    for(const s of starts){
-      const outs = STATE.connections.filter(c => c.from === s.id && c.fromPort === 'exec');
-      if(outs.length === 0){ await executeNode(s.id); }
-      else { for(const o of outs){ await executeNode(o.to); } }
-    }
-  } catch(err) {
-    log('Runtime Error: ' + (err?.message || String(err)),'error');
-    if(!inEditor) forwardToRunWindow('error', 'Runtime Error: ' + (err?.message || String(err)));
-  }
-
-  STATE.isRunning = false;
-  log('--- Execution Finished ---','info');
-  restoreConsole();
-  disableRunUI(false);
-  RUN_IN_EDITOR_ACTIVE = false;
-}
-
-async function stepOnce(){
-  if(STATE.isRunning) { log('Already running','warn'); return; }
-  disableRunUI(true);
-  openRunWindow();
-  proxyConsoleToRuntime(false);
-  STATE.isRunning = true;
-  log('--- Step Execution ---','info');
-  const starts = Object.values(STATE.nodes).filter(n => n.type === 'evt.start');
-  try {
-    if(starts.length === 0) { log('No start nodes','warn'); }
-    else {
-      const s = starts[0];
-      const outs = STATE.connections.filter(c => c.from === s.id && c.fromPort === 'exec');
-      if(outs.length === 0) await executeNode(s.id);
-      else for(const o of outs) await executeNode(o.to);
-    }
-  } catch(e){ log('Step Error: '+(e?.message||e),'error'); forwardToRunWindow('error','Step Error: '+(e?.message||e)); }
-  STATE.isRunning = false;
-  restoreConsole();
-  disableRunUI(false);
-}
-
-// stop engine
-function stopEngine(){
-  Object.keys(STATE.timers).forEach(k=>{ try{ clearInterval(STATE.timers[k]); }catch(e){} delete STATE.timers[k]; });
-  STATE.isRunning = false;
-  restoreConsole();
-  log('--- Execution Stopped ---','info');
-  disableRunUI(false);
-}
-
-// executeNode & evaluateDataNode
-async function executeNode(nodeId) {
-  if(!STATE.isRunning) return;
-  const node = STATE.nodes[nodeId]; if(!node) return;
-  const def = REGISTRY[node.type]; if(!def) return;
-  const el = document.getElementById(nodeId); if(el) el.classList.add('running');
-  await new Promise(r=>setTimeout(r, 30));
-  if(el) el.classList.remove('running');
-
-  const ctx = {
-    node,
-    input: (name) => node.inputs[name],
-    eval: async (portName) => {
-      const conn = STATE.connections.find(c => c.to === nodeId && c.toPort === portName);
-      if(conn) return await evaluateDataNode(conn.from, conn.fromPort);
-      return node.inputs[portName];
-    },
-    trigger: async (outPort) => {
-      const conns = STATE.connections.filter(c => c.from === nodeId && c.fromPort === outPort);
-      for(const c of conns) await executeNode(c.to);
-    },
-    setTempOutput: (port, val) => { node.outputs = node.outputs || {}; node.outputs[port] = val; }
+  // Helpers for Builders
+  const v = (n, k, f) => {
+    const c = state.connections.find(x => x.to.node === n.id && x.to.port === k);
+    return c ? `_${c.from.node}` : JSON.stringify(f[k] !== undefined ? f[k] : n.inputs.find(i => i.name === k)?.value);
   };
 
-  try {
-    if(def.execFunc){
-      const r = await def.execFunc(ctx);
-      if(typeof r === 'string') await ctx.trigger(r);
-    } else {
-      const outConns = STATE.connections.filter(c => c.from === nodeId && c.fromPort === 'exec');
-      for(const c of outConns) await executeNode(c.to);
-    }
-    if(node._customScript){
-      try {
-        const fn = new Function('ctx','state','log','return ('+node._customScript+')(ctx,state,log);');
-        await fn(ctx, STATE, (m)=>{ log('[node-script] '+m,'info'); if(!RUN_IN_EDITOR_ACTIVE) forwardToRunWindow('info','[node-script] '+m); });
-      } catch(e){ el && el.classList.add('error'); throw e; }
-    }
-  } catch(e) {
-    el && el.classList.add('error');
-    log('Node Error (' + (def.name || node.type) + '): ' + (e?.message || String(e)), 'error');
-    if(!RUN_IN_EDITOR_ACTIVE) forwardToRunWindow('error', 'Node Error (' + (def.name || node.type) + '): ' + (e?.message || String(e)));
-    throw e;
-  }
-}
+  // 1. Events
+  reg({ type: 'e.start', category: 'Event', title: 'On Start', outputs: [{ name: 'exec', type: 'exec' }], build: () => `/*Start*/` });
+  reg({ type: 'e.tick', category: 'Event', title: 'On Tick', outputs: [{ name: 'exec', type: 'exec' }], build: () => `/*Tick*/` });
+  reg({ type: 'e.key', category: 'Event', title: 'Key Press', outputs: [{ name: 'down', type: 'exec' }, { name: 'up', type: 'exec' }], fields: [{ name: 'key', type: 'text', default: 'Space' }], build: () => `/*Key*/` });
 
-async function evaluateDataNode(nodeId, outPort) {
-  const node = STATE.nodes[nodeId]; const def = REGISTRY[node.type];
-  if(!node || !def) return null;
-  if(node.outputs && node.outputs[outPort] !== undefined) return node.outputs[outPort];
-  const ctx = {
-    eval: async (p) => { const c = STATE.connections.find(x => x.to === nodeId && x.toPort === p); if(c) return await evaluateDataNode(c.from, c.fromPort); return node.inputs[p]; },
-    input: (p) => node.inputs[p]
-  };
-  if(def.execFunc){
-    const res = await def.execFunc({...ctx, node});
-    if(res && typeof res === 'object' && res[outPort] !== undefined) return res[outPort];
-    return res;
-  }
-  return null;
-}
+  // 2. Logic
+  reg({ type: 'l.if', category: 'Logic', title: 'If', inputs: [{ name: 'exec', type: 'exec' }, { name: 'cond' }], outputs: [{ name: 'true', type: 'exec' }, { name: 'false', type: 'exec' }], build: (n, g) => `if(${g(n, 'cond')}){ {{EXEC_true}} }else{ {{EXEC_false}} }` });
+  reg({ type: 'l.eq', category: 'Logic', title: 'Equal', inputs: [{ name: 'a' }, { name: 'b' }], outputs: [{ name: 'res' }], build: (n, g) => `(${g(n, 'a')}==${g(n, 'b')})` });
+  reg({ type: 'l.neq', category: 'Logic', title: 'Not Equal', inputs: [{ name: 'a' }, { name: 'b' }], outputs: [{ name: 'res' }], build: (n, g) => `(${g(n, 'a')}!=${g(n, 'b')})` });
+  reg({ type: 'l.gt', category: 'Logic', title: 'Greater >', inputs: [{ name: 'a' }, { name: 'b' }], outputs: [{ name: 'res' }], build: (n, g) => `(${g(n, 'a')}>${g(n, 'b')})` });
+  reg({ type: 'l.and', category: 'Logic', title: 'AND &&', inputs: [{ name: 'a' }, { name: 'b' }], outputs: [{ name: 'res' }], build: (n, g) => `(${g(n, 'a')}&&${g(n, 'b')})` });
 
-// --- UI Helpers & serialization + localStorage ---
+  // 3. Math
+  reg({ type: 'm.num', category: 'Math', title: 'Number', inputs: [], outputs: [{ name: 'val' }], fields: [{ name: 'val', type: 'number', default: 0 }], build: (n, g, f) => f.val });
+  reg({ type: 'm.add', category: 'Math', title: 'Add', inputs: [{ name: 'a' }, { name: 'b' }], outputs: [{ name: 'res' }], build: (n, g) => `(${g(n, 'a')}+${g(n, 'b')})` });
+  reg({ type: 'm.sub', category: 'Math', title: 'Subtract', inputs: [{ name: 'a' }, { name: 'b' }], outputs: [{ name: 'res' }], build: (n, g) => `(${g(n, 'a')}-${g(n, 'b')})` });
+  reg({ type: 'm.mul', category: 'Math', title: 'Multiply', inputs: [{ name: 'a' }, { name: 'b' }], outputs: [{ name: 'res' }], build: (n, g) => `(${g(n, 'a')}*${g(n, 'b')})` });
+  reg({ type: 'm.div', category: 'Math', title: 'Divide', inputs: [{ name: 'a' }, { name: 'b' }], outputs: [{ name: 'res' }], build: (n, g) => `(${g(n, 'a')}/${g(n, 'b')})` });
+  reg({ type: 'm.rand', category: 'Math', title: 'Random Range', inputs: [{ name: 'min' }, { name: 'max' }], outputs: [{ name: 'res' }], build: (n, g) => `(Math.random()*(${g(n, 'max')}-${g(n, 'min')})+${g(n, 'min')})` });
+  reg({ type: 'm.floor', category: 'Math', title: 'Floor', inputs: [{ name: 'v' }], outputs: [{ name: 'res' }], build: (n, g) => `Math.floor(${g(n, 'v')})` });
+  reg({ type: 'm.sin', category: 'Math', title: 'Sine', inputs: [{ name: 'v' }], outputs: [{ name: 'res' }], build: (n, g) => `Math.sin(${g(n, 'v')})` });
 
-// Save / load to localStorage
-function saveToStorage(){
-  try {
-    const copyNodes = JSON.parse(JSON.stringify(STATE.nodes));
-    // strip DOM references and event handlers
-    Object.values(copyNodes).forEach(n => { delete n._listeners; delete n._handler; delete n._handlerEl; });
-    const project = { nodes: copyNodes, connections: STATE.connections, variables: STATE.variables, plugins: STATE.plugins, functions: STATE.functions };
-    localStorage.setItem(CONFIG.storageKey, JSON.stringify(project));
-    log('Saved to localStorage','info');
-  } catch(e){ log('Save error: '+(e?.message||e),'error'); }
-}
-let saveDebounceTimer = null;
-function saveToStorageDebounced(){
-  if(saveDebounceTimer) clearTimeout(saveDebounceTimer);
-  saveDebounceTimer = setTimeout(()=>{ saveToStorage(); saveDebounceTimer = null; }, 400);
-}
+  // 4. Strings
+  reg({ type: 's.str', category: 'String', title: 'String', outputs: [{ name: 'val' }], fields: [{ name: 'val', type: 'text', default: 'Hello' }], build: (n, g, f) => JSON.stringify(f.val) });
+  reg({ type: 's.cat', category: 'String', title: 'Concat', inputs: [{ name: 'a' }, { name: 'b' }], outputs: [{ name: 'res' }], build: (n, g) => `(${g(n, 'a')} + ${g(n, 'b')})` });
+  reg({ type: 's.len', category: 'String', title: 'Length', inputs: [{ name: 'str' }], outputs: [{ name: 'len' }], build: (n, g) => `${g(n, 'str')}.length` });
+  reg({ type: 's.upper', category: 'String', title: 'To Upper', inputs: [{ name: 'str' }], outputs: [{ name: 'res' }], build: (n, g) => `${g(n, 'str')}.toUpperCase()` });
 
-function loadFromStorage(){
-  try {
-    const data = localStorage.getItem(CONFIG.storageKey);
-    if(!data) return false;
-    const project = JSON.parse(data);
-    // cleanup existing
-    Object.values(STATE.nodes).forEach(n => { if(n._listeners) n._listeners.forEach(l=>{ try{ l.el.removeEventListener(l.ev, l.handler); }catch(e){} }); if(n._handler && n._handlerEl) try{ n._handlerEl.removeEventListener('click', n._handler); }catch(e){} });
-    Object.keys(STATE.timers).forEach(k=>{ try{ clearInterval(STATE.timers[k]); }catch(e){} delete STATE.timers[k]; });
-    STATE.nodes = {}; STATE.connections = [];
-    DOM.canvas.innerHTML = '<svg id="connections"></svg>';
-    DOM.svg = document.getElementById('connections');
-    Object.values(project.nodes || {}).forEach(n => {
-      addNode(n.type, n.x||80, n.y||60, n.id, n.inputs);
-      if(n._customScript) STATE.nodes[n.id]._customScript = n._customScript;
-      if(n._customColor) { STATE.nodes[n.id]._customColor = n._customColor; const head = document.querySelector(`#${n.id} .node-header`); if(head) head.style.background = n._customColor; }
-      if(n._size) { const el = document.getElementById(n.id); if(el){ el.style.width = (n._size.w||el.offsetWidth)+'px'; el.style.height = (n._size.h||el.offsetHeight)+'px'; } }
-    });
-    STATE.connections = project.connections || [];
-    STATE.variables = project.variables || {};
-    STATE.plugins = project.plugins || {};
-    STATE.functions = project.functions || {};
-    initPalette(); updateConnections(); updateVarPanel(); updateCanvasInfo(); renderPlugins();
-    log('Loaded from localStorage','info');
-    return true;
-  } catch(e){ log('Load error: '+(e?.message||e),'error'); return false; }
-}
+  // 5. Arrays
+  reg({ type: 'a.new', category: 'Array', title: 'New Array', outputs: [{ name: 'arr' }], build: () => `[]` });
+  reg({ type: 'a.push', category: 'Array', title: 'Push', inputs: [{ name: 'exec', type: 'exec' }, { name: 'arr' }, { name: 'val' }], outputs: [{ name: 'out', type: 'exec' }], build: (n, g) => `${g(n, 'arr')}.push(${g(n, 'val')})` });
+  reg({ type: 'a.get', category: 'Array', title: 'Get Index', inputs: [{ name: 'arr' }, { name: 'idx' }], outputs: [{ name: 'val' }], build: (n, g) => `${g(n, 'arr')}[${g(n, 'idx')}]` });
+  reg({ type: 'a.len', category: 'Array', title: 'Count', inputs: [{ name: 'arr' }], outputs: [{ name: 'len' }], build: (n, g) => `${g(n, 'arr')}.length` });
 
-// show properties
-function showProperties(id){
-  const node = STATE.nodes[id];
-  if(!DOM.props) return;
-  DOM.props.innerHTML = '';
-  if(!node){ DOM.props.innerHTML = '<p class="empty-msg">Select a node to edit properties.</p>'; return; }
-  const def = REGISTRY[node.type];
-  DOM.modalTitle && (DOM.modalTitle.textContent = def.name + ' — Properties');
-  // If multi-selected, show nothing except basic info
-  if(STATE.selection.length > 1){
-    DOM.props.innerHTML = `<p>${STATE.selection.length} nodes selected</p>`;
-    return;
-  }
-  def.inputs.forEach(inp => {
-    const row = document.createElement('div'); row.className = 'prop-row';
-    const label = document.createElement('label'); label.textContent = `${inp.id} (${inp.type})`; row.appendChild(label);
-    if(inp.type === 'boolean'){
-      const sel = document.createElement('select'); sel.innerHTML = `<option value="true">true</option><option value="false">false</option>`;
-      sel.value = String(node.inputs[inp.id]);
-      sel.onchange = (e) => { node.inputs[inp.id] = e.target.value === 'true'; updateNodeInputUI(id, inp.id, e.target.value); saveToStorageDebounced(); };
-      row.appendChild(sel);
-    } else {
-      const input = document.createElement('input'); input.value = node.inputs[inp.id];
-      input.onchange = (e)=> { node.inputs[inp.id] = e.target.value; updateNodeInputUI(id, inp.id, e.target.value); saveToStorageDebounced(); };
-      row.appendChild(input);
-    }
-    DOM.props.appendChild(row);
-  });
+  // 6. Objects
+  reg({ type: 'o.new', category: 'Object', title: 'New Object', outputs: [{ name: 'obj' }], build: () => `{}` });
+  reg({ type: 'o.set', category: 'Object', title: 'Set Prop', inputs: [{ name: 'exec', type: 'exec' }, { name: 'obj' }, { name: 'key' }, { name: 'val' }], outputs: [{ name: 'out', type: 'exec' }], build: (n, g) => `${g(n, 'obj')}[${g(n, 'key')}] = ${g(n, 'val')}` });
+  reg({ type: 'o.get', category: 'Object', title: 'Get Prop', inputs: [{ name: 'obj' }, { name: 'key' }], outputs: [{ name: 'val' }], build: (n, g) => `${g(n, 'obj')}[${g(n, 'key')}]` });
+  reg({ type: 'o.json', category: 'Object', title: 'Parse JSON', inputs: [{ name: 'str' }], outputs: [{ name: 'obj' }], build: (n, g) => `JSON.parse(${g(n, 'str')})` });
 
-  // comment title special case
-  if(node.type === 'comment'){
-    const hr = document.createElement('hr'); hr.style.border = '0'; hr.style.borderTop = '1px solid #222'; DOM.props.appendChild(hr);
-    const csLabel = document.createElement('div'); csLabel.style.color = 'var(--text-dim)'; csLabel.textContent = 'Title'; DOM.props.appendChild(csLabel);
-    const titleInput = document.createElement('input'); titleInput.value = node.inputs.title || ''; titleInput.onchange = (e)=> { node.inputs.title = e.target.value; const head = document.querySelector(`#${id} .comment-title`); if(head) head.textContent = e.target.value; saveToStorageDebounced(); };
-    DOM.props.appendChild(titleInput);
-  }
+  // 7. Graphics
+  reg({ type: 'g.clear', category: 'Graphics', title: 'Clear', inputs: [{ name: 'exec', type: 'exec' }], outputs: [{ name: 'out', type: 'exec' }], build: () => `ctx.clearRect(0,0,800,600)` });
+  reg({ type: 'g.rect', category: 'Graphics', title: 'Draw Rect', inputs: [{ name: 'exec', type: 'exec' }, { name: 'x' }, { name: 'y' }, { name: 'w' }, { name: 'h' }, { name: 'c' }], outputs: [{ name: 'out', type: 'exec' }], fields: [{ name: 'c', type: 'color', default: '#ff0000' }], build: (n, g, f) => `{ctx.fillStyle=${v(n, 'c', f)};ctx.fillRect(${g(n, 'x')},${g(n, 'y')},${g(n, 'w')},${g(n, 'h')})}` });
+  reg({ type: 'g.text', category: 'Graphics', title: 'Draw Text', inputs: [{ name: 'exec', type: 'exec' }, { name: 'txt' }, { name: 'x' }, { name: 'y' }], outputs: [{ name: 'out', type: 'exec' }], build: (n, g) => `{ctx.fillStyle='#fff';ctx.font='16px monospace';ctx.fillText(${g(n, 'txt')},${g(n, 'x')},${g(n, 'y')})}` });
 
-  // custom script controls
-  const hr = document.createElement('hr'); hr.style.border = '0'; hr.style.borderTop = '1px solid #222'; DOM.props.appendChild(hr);
-  const csLabel = document.createElement('div'); csLabel.style.color = 'var(--text-dim)'; csLabel.textContent = 'Custom Script (runs after node exec)'; DOM.props.appendChild(csLabel);
-  const csBtn = document.createElement('button'); csBtn.textContent = node._customScript ? 'Edit Script' : 'Add Script'; csBtn.onclick = ()=> addCustomScriptToNode(id);
-  DOM.props.appendChild(csBtn);
-  const colorBtn = document.createElement('button'); colorBtn.textContent = 'Header Color'; colorBtn.style.marginLeft = '8px';
-  colorBtn.onclick = ()=> { const c = prompt('Header CSS (empty to reset):', node._customColor || '') || ''; node._customColor = c || null; const h = document.querySelector(`#${id} .node-header`); if(h) h.style.background = c || ''; saveToStorageDebounced(); };
-  DOM.props.appendChild(colorBtn);
-}
+  // 8. Variables
+  reg({ type: 'v.set', category: 'Variable', title: 'Set Global', inputs: [{ name: 'exec', type: 'exec' }, { name: 'val' }], outputs: [{ name: 'out', type: 'exec' }], fields: [{ name: 'key', type: 'text', default: 'score' }], build: (n, g, f) => `STATE['${f.key}']=${g(n, 'val')}` });
+  reg({ type: 'v.get', category: 'Variable', title: 'Get Global', inputs: [], outputs: [{ name: 'val' }], fields: [{ name: 'key', type: 'text', default: 'score' }], build: (n, g, f) => `(STATE['${f.key}']||0)` });
 
-// update node input UI (for inline inputs)
-function updateNodeInputUI(nodeId, inputId, val){
-  const inputEl = document.querySelector(`#${nodeId} .node-input[data-inp="${inputId}"]`);
-  if(inputEl) inputEl.value = val;
-}
-
-// Variables panel: now shows both state variables and var.set nodes defaults
-function updateVarPanel(){
-  if(!DOM.vars) return;
-  DOM.vars.innerHTML = '';
-  // gather variable defaults from var.set nodes
-  const nodeVarDefaults = {};
-  Object.values(STATE.nodes).forEach(n => {
-    if(n.type === 'var.set' && n.inputs && n.inputs.name){
-      nodeVarDefaults[n.inputs.name] = n.inputs.val;
-    }
-  });
-  // merge keys
-  const allKeys = new Set([...Object.keys(STATE.variables||{}), ...Object.keys(nodeVarDefaults)]);
-  allKeys.forEach(k => {
-    const wrapper = document.createElement('div'); wrapper.className='var-item';
-    const nameSpan = document.createElement('span'); nameSpan.textContent = k;
-    const current = STATE.variables[k] !== undefined ? STATE.variables[k] : nodeVarDefaults[k];
-    const valInput = document.createElement('input'); valInput.value = JSON.stringify(current); valInput.style.background='transparent'; valInput.style.border='none'; valInput.style.color='var(--accent)'; valInput.style.width='60%';
-    valInput.onchange = (e)=> {
-      try { const parsed = JSON.parse(e.target.value); STATE.variables[k] = parsed; } catch(_){ STATE.variables[k] = e.target.value; }
-      updateVarPanel(); saveToStorageDebounced();
+  // --- NODE RENDERING ---
+  function createNode(def, x, y) {
+    const id = uid();
+    const n = {
+      id, x, y, type: def.type, title: def.title,
+      inputs: (def.inputs || []).map(i => ({ ...i, value: i.default || '' })),
+      outputs: (def.outputs || []).map(o => ({ ...o })),
+      fields: (def.fields || []).map(f => ({ ...f })),
+      def
     };
-    const removeBtn = document.createElement('button'); removeBtn.className='icon-btn'; removeBtn.innerHTML = '<i class="material-icons">delete</i>';
-    removeBtn.onclick = ()=> { delete STATE.variables[k]; updateVarPanel(); saveToStorageDebounced(); };
-    wrapper.appendChild(nameSpan); wrapper.appendChild(valInput); wrapper.appendChild(removeBtn);
-    DOM.vars.appendChild(wrapper);
-  });
-}
-
-// Save & Load buttons
-if(DOM.saveBtn) DOM.saveBtn.onclick = ()=> {
-  const json = JSON.stringify({ nodes: STATE.nodes, connections: STATE.connections, variables: STATE.variables, plugins: STATE.plugins, functions: STATE.functions }, null, 2);
-  const blob = new Blob([json], { type: 'application/json' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'project.json'; a.click();
-};
-if(DOM.loadBtn && DOM.fileInput) DOM.loadBtn.onclick = ()=> DOM.fileInput.click();
-if(DOM.fileInput) DOM.fileInput.onchange = (e) => {
-  const file = e.target.files[0]; if(!file) return;
-  const reader = new FileReader();
-  reader.onload = (evt) => {
-    try {
-      const data = JSON.parse(evt.target.result);
-      // overwrite state
-      STATE.nodes = {}; STATE.connections = []; DOM.canvas.innerHTML = '<svg id="connections"></svg>'; DOM.svg = document.getElementById('connections');
-      Object.values(data.nodes || {}).forEach(n => {
-        addNode(n.type, n.x, n.y, n.id, n.inputs);
-        if(n._customScript) STATE.nodes[n.id]._customScript = n._customScript;
-        if(n._customColor) { STATE.nodes[n.id]._customColor = n._customColor; const head = document.querySelector(`#${n.id} .node-header`); if(head) head.style.background = n._customColor; }
-        if(n._size) { const el = document.getElementById(n.id); if(el){ el.style.width = (n._size.w||el.offsetWidth)+'px'; el.style.height = (n._size.h||el.offsetHeight)+'px'; } }
-      });
-      STATE.connections = data.connections || []; STATE.variables = data.variables || {}; STATE.plugins = data.plugins || {}; STATE.functions = data.functions || {};
-      updateConnections(); updateVarPanel(); initPalette(); renderPlugins(); saveToStorageDebounced();
-      log('Project loaded from file','info');
-    } catch(err) { log('Load Error: '+(err?.message||err),'error'); }
-  };
-  reader.readAsText(file);
-};
-
-// clear
-if(DOM.clearBtn) DOM.clearBtn.onclick = ()=> {
-  if(confirm('Clear all?')) {
-    Object.values(STATE.nodes).forEach(n => { if(n._listeners) n._listeners.forEach(l=>{ try{ l.el.removeEventListener(l.ev, l.handler); }catch(e){} }); if(n._handler && n._handlerEl) try{ n._handlerEl.removeEventListener('click', n._handler); }catch(e){} });
-    Object.keys(STATE.timers).forEach(k=>{ try{ clearInterval(STATE.timers[k]); }catch(e){} delete STATE.timers[k]; });
-    STATE.nodes = {}; STATE.connections = []; DOM.canvas.innerHTML = '<svg id="connections"></svg>'; DOM.svg = document.getElementById('connections'); DOM.props.innerHTML = '<p class="empty-msg">Select a node to edit properties.</p>';
-    updateConnections(); updateVarPanel(); saveToStorageDebounced();
+    state.nodes[id] = n;
+    renderNodeDOM(n);
   }
-};
 
-// theme toggle
-if(DOM.themeBtn) DOM.themeBtn.onclick = ()=> document.body.classList.toggle('dark');
+  function renderNodeDOM(n) {
+    const el = create('div', `node ${state.selected.has(n.id) ? 'selected' : ''}`);
+    el.id = n.id;
+    el.style.left = n.x + 'px'; el.style.top = n.y + 'px';
 
-// open runwindow btn behavior
-if(DOM.runWindowBtn) DOM.runWindowBtn.onclick = openRunWindow;
-if(DOM.runEditorBtn) DOM.runEditorBtn.onclick = ()=> { runEngine(false, true); };
+    // --- HEADER EVENT FIX ---
+    const hdr = create('div', 'node-header');
+    hdr.textContent = n.title;
+    hdr.onmousedown = (e) => {
+      e.stopPropagation(); // CRITICAL FIX: Stop viewport logic
+      if (e.button !== 0) return;
 
-// export / preview
-async function nodeToJS(nodeId, visited = new Set()){
-  if(visited.has(nodeId)) return '';
-  visited.add(nodeId);
-  const node = STATE.nodes[nodeId]; if(!node) return '';
-  const def = REGISTRY[node.type]; if(!def) return '';
-  let js = '';
-  // special-case known nodes for clean output
-  switch(node.type){
-    case 'evt.start': break;
-    case 'console.log': js += `console.log(${JSON.stringify(node.inputs.msg || '')});\n`; break;
-    case 'console.warn': js += `console.warn(${JSON.stringify(node.inputs.msg || '')});\n`; break;
-    case 'var.set': {
-      const name = String(node.inputs.name || 'myVar').replace(/[^a-zA-Z0-9_$]/g,'_');
-      const val = node.inputs.val;
-      try { js += `let ${name} = ${JSON.stringify(JSON.parse(String(val)))};\n`; } catch(_) { js += `let ${name} = ${JSON.stringify(String(val))};\n`; }
-      break;
-    }
-    case 'var.get': js += `/* read variable ${JSON.stringify(node.inputs.name||'')} */\n`; break;
-    case 'math.op': js += `/* math */\nlet __tmp = ${JSON.stringify(node.inputs.a)} ${node.inputs.op || '+'} ${JSON.stringify(node.inputs.b)};\n`; break;
-    case 'str.join': js += `let __tmp = ${JSON.stringify(node.inputs.a)} + ${JSON.stringify(node.inputs.sep)} + ${JSON.stringify(node.inputs.b)};\n`; break;
-    case 'browser.alert': js += `alert(${JSON.stringify(node.inputs.msg || '')});\n`; break;
-    case 'browser.open': js += `window.open(${JSON.stringify(node.inputs.url || '')},'_blank');\n`; break;
-    case 'dom.get_by_id': js += `const el_${nodeId} = document.getElementById(${JSON.stringify(node.inputs.id||'')});\n`; break;
-    case 'dom.set_text': js += `document.querySelector(${JSON.stringify(node.inputs.sel||'')}).innerText = ${JSON.stringify(node.inputs.text||'')};\n`; break;
-    case 'dom.set_html': js += `document.querySelector(${JSON.stringify(node.inputs.sel||'')}).innerHTML = ${JSON.stringify(node.inputs.html||'')};\n`; break;
-    case 'arr.create': js += `let arr_${nodeId} = [];\n`; break;
-    case 'arr.push': js += `/* push (manual) */\n`; break;
-    case 'comment': js += `/* ${node.inputs.title || 'comment'} */\n`; break;
-    default:
-      // generic fallback: emit comment with inputs
-      js += `/* ${def.name} (${def.type}) */\n`;
-      Object.keys(node.inputs||{}).forEach(k => {
-        if(k === 'exec') return;
-        const v = node.inputs[k];
-        js += `// ${k} = ${JSON.stringify(v)}\n`;
-      });
-      js += `\n`;
-      break;
+      interact.mode = 'dragNode';
+      interact.start = { x: e.clientX, y: e.clientY };
+
+      if (!e.shiftKey && !state.selected.has(n.id)) {
+        state.selected.clear();
+        state.selected.add(n.id);
+      } else if (e.shiftKey) {
+        state.selected.has(n.id) ? state.selected.delete(n.id) : state.selected.add(n.id);
+      }
+      refreshSelection();
+
+      const dragData = {};
+      state.selected.forEach(nid => dragData[nid] = { x: state.nodes[nid].x, y: state.nodes[nid].y });
+      interact.dragData = dragData;
+    };
+    el.appendChild(hdr);
+
+    // Body
+    const body = create('div', 'node-body');
+    const l = create('div'); const r = create('div');
+
+    n.inputs.forEach(i => {
+      const row = create('div', 'socket');
+      const p = create('div', `port ${i.type || ''}`);
+      p.dataset.port = i.name; p.dataset.node = n.id; p.dataset.side = 'in';
+      // Port Events
+      p.onmousedown = (e) => {
+        e.stopPropagation(); e.preventDefault();
+        // Check disconnect
+        const exist = state.connections.find(c => c.to.node === n.id && c.to.port === i.name);
+        if (exist) {
+          removeConnection(exist.id);
+          interact.mode = 'link';
+          interact.dragData = { node: exist.from.node, port: exist.from.port };
+          createTempLink();
+        }
+      };
+
+      row.appendChild(p);
+      row.appendChild(document.createTextNode(i.name));
+      l.appendChild(row);
+    });
+
+    n.outputs.forEach(o => {
+      const row = create('div', 'socket out');
+      row.appendChild(document.createTextNode(o.name));
+      const p = create('div', `port ${o.type || ''}`);
+      p.dataset.port = o.name; p.dataset.node = n.id; p.dataset.side = 'out';
+      // Port Events
+      p.onmousedown = (e) => {
+        e.stopPropagation(); e.preventDefault();
+        interact.mode = 'link';
+        interact.dragData = { node: n.id, port: o.name };
+        createTempLink();
+      };
+      row.appendChild(p);
+      r.appendChild(row);
+    });
+
+    body.append(l, r);
+    el.appendChild(body);
+    refs.canvas.appendChild(el);
   }
-  // traverse exec outputs
-  const outs = STATE.connections.filter(c => c.from === nodeId && c.fromPort === 'exec');
-  for(const c of outs) js += await nodeToJS(c.to, visited);
-  return js;
-}
 
-async function generateJS(){
-  let code = '';
-  const starts = Object.values(STATE.nodes).filter(n => n.type === 'evt.start');
-  if(starts.length === 0) code = '// No start nodes found. Connect nodes to evt.start to export.\n';
-  else for(const s of starts) code += await nodeToJS(s.id, new Set());
-  if(DOM.exportTextarea) DOM.exportTextarea.value = code;
-  try { await navigator.clipboard.writeText(code); log('[Export JS] Copied to clipboard!', 'info'); } catch(e){ log('[Export JS] Failed to copy: '+(e?.message||e),'error'); }
-  return code;
-}
-if(DOM.exportBtn) DOM.exportBtn.onclick = generateJS;
-if(DOM.exportPreviewBtn) DOM.exportPreviewBtn.onclick = ()=> { const code = (DOM.exportTextarea && DOM.exportTextarea.value) || ''; openModal('Exported JS Preview', `<pre style="white-space:pre-wrap;background:#0b0b0d;padding:12px;border-radius:6px;color:#9ef">${escapeHtml(code)}</pre>`); };
+  // --- CONNECTION LOGIC ---
+  function renderConnections() {
+    refs.svg.innerHTML = ''; // Clear
+    state.connections.forEach(c => {
+      const n1 = state.nodes[c.from.node];
+      const n2 = state.nodes[c.to.node];
+      if (!n1 || !n2) return;
+      const el1 = byId(n1.id); const el2 = byId(n2.id);
+      if (!el1 || !el2) return;
 
-// --- CONTEXT MENU & PER-NODE actions ---
-function showNodeContextMenu(x,y,nodeId){
-  const menu = DOM.contextMenu; if(!menu) return;
-  menu.innerHTML = '';
-  const addItem = (label, cb) => { const d = document.createElement('div'); d.className = 'ctx-item'; d.textContent = label; d.onclick = ()=>{ cb(); menu.classList.add('hidden'); }; menu.appendChild(d); };
-  addItem('Delete Node', ()=> deleteNodes([nodeId]));
-  addItem('Duplicate Node', ()=> duplicateNode(nodeId));
-  addItem('Add/Edit Custom Script', ()=> addCustomScriptToNode(nodeId));
-  addItem('Run Custom Script', ()=> runCustomScriptForNode(nodeId));
-  addItem('Export Node JSON', ()=> { const n = STATE.nodes[nodeId]; const s = JSON.stringify(n, null, 2); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([s],{type:'application/json'})); a.download = `${nodeId}.json`; a.click(); });
-  menu.style.left = x + 'px'; menu.style.top = y + 'px'; menu.classList.remove('hidden');
-}
-document.addEventListener('click', ()=> { if(DOM.contextMenu) DOM.contextMenu.classList.add('hidden'); });
+      const p1 = el1.querySelector(`[data-port="${c.from.port}"][data-side="out"]`);
+      const p2 = el2.querySelector(`[data-port="${c.to.port}"][data-side="in"]`);
+      if (!p1 || !p2) return;
 
-function deleteNodes(ids){ ids.forEach(id=>{ const n = STATE.nodes[id]; if(!n) return; if(n._listeners) n._listeners.forEach(l=>{ try{ l.el.removeEventListener(l.ev,l.handler); }catch(e){} }); if(n._handler && n._handlerEl) try{ n._handlerEl.removeEventListener('click', n._handler); }catch(e){} if(STATE.timers[id]) { clearInterval(STATE.timers[id]); delete STATE.timers[id]; } delete STATE.nodes[id]; document.getElementById(id)?.remove(); }); STATE.connections = STATE.connections.filter(c=> !ids.includes(c.from) && !ids.includes(c.to)); updateConnections(); DOM.props.innerHTML = '<p class="empty-msg">Select a node to edit properties.</p>'; STATE.selection = STATE.selection.filter(s => !ids.includes(s)); updateCanvasInfo(); saveToStorageDebounced(); }
-function duplicateNode(id){ const s = STATE.nodes[id]; if(!s) return; const newId = uid(); const copyInputs = JSON.parse(JSON.stringify(s.inputs||{})); addNode(s.type, (s.x||100)+20, (s.y||100)+20, newId, copyInputs); if(s._customScript) STATE.nodes[newId]._customScript = s._customScript; if(s._customColor) { STATE.nodes[newId]._customColor = s._customColor; const head = document.querySelector(`#${newId} .node-header`); if(head) head.style.background = s._customColor; } updateConnections(); saveToStorageDebounced(); log('Duplicated '+id+' -> '+newId,'info'); }
+      const r1 = p1.getBoundingClientRect();
+      const r2 = p2.getBoundingClientRect();
+      const view = refs.viewport.getBoundingClientRect();
+      const z = state.cam.z;
 
-function addCustomScriptToNode(nodeId){
-  const node = STATE.nodes[nodeId];
-  const existing = node._customScript || '';
-  const code = prompt('Enter JS that returns a function (ctx,state,log). Example:\n(ctx,state,log)=>{ log(\"hi\"); }', existing) || '';
-  if(code.trim()===''){ node._customScript = null; log('Removed custom script','info'); saveToStorageDebounced(); return; }
-  node._customScript = code; log('Custom script saved','info'); saveToStorageDebounced();
-}
-async function runCustomScriptForNode(nodeId){
-  const node = STATE.nodes[nodeId]; if(!node || !node._customScript){ log('No custom script','warn'); return; }
-  try { const fn = new Function('ctx','state','log','return ('+node._customScript+')(ctx,state,log);'); await fn({node, input: n=>node.inputs[n], eval: async ()=>null}, STATE, (m)=>{ log('[node-script] '+m,'info'); forwardToRunWindow('info','[node-script] '+m); }); log('Custom script run ok','info'); } catch(e){ log('Custom script error: '+(e?.message||e),'error'); forwardToRunWindow('error','Custom script error: '+(e?.message||e)); }
-}
+      const x1 = (r1.left + r1.width / 2 - view.left - state.cam.x) / z;
+      const y1 = (r1.top + r1.height / 2 - view.top - state.cam.y) / z;
+      const x2 = (r2.left + r2.width / 2 - view.left - state.cam.x) / z;
+      const y2 = (r2.top + r2.height / 2 - view.top - state.cam.y) / z;
 
-// keyboard shortcuts
-document.addEventListener('keydown', (e)=> {
-  const ae = document.activeElement; if(ae && (ae.tagName==='INPUT' || ae.tagName==='TEXTAREA' || ae.isContentEditable)) return;
-  if(e.key === 'Backspace') { if(STATE.selection.length){ e.preventDefault(); deleteNodes([...STATE.selection]); } }
-  if(e.ctrlKey && (e.key === '+' || e.key === '=')){ e.preventDefault(); STATE.transform.k = clamp(STATE.transform.k + 0.1, 0.2, 5); updateTransform(); }
-  if(e.ctrlKey && e.key === '-'){ e.preventDefault(); STATE.transform.k = clamp(STATE.transform.k - 0.1, 0.2, 5); updateTransform(); }
-  if(e.ctrlKey && (e.key === '0')) { e.preventDefault(); STATE.transform.k = 1; updateTransform(); }
-});
+      const d = Math.abs(x1 - x2) * 0.5;
+      const path = createNS('path', 'connection-path');
+      path.setAttribute('d', `M ${x1} ${y1} C ${x1 + d} ${y1} ${x2 - d} ${y2} ${x2} ${y2}`);
+      path.onmousedown = (e) => { e.stopPropagation(); if (confirm('Delete?')) removeConnection(c.id); };
+      refs.svg.appendChild(path);
+    });
+  }
 
-// --- RIGHT-SIDE TAB SWITCHING ---
-function initRightTabs(){
-  const sidebar = document.querySelector('#sidebar-right');
-  if(!sidebar) return;
-  const tabBar = document.createElement('div'); tabBar.style.display='flex'; tabBar.style.gap='6px'; tabBar.style.padding='6px'; tabBar.style.borderBottom='1px solid var(--border)';
-  const tabs = [
-    {label:'Properties', sel:'.prop-panel'},
-    {label:'Variables', sel:'.var-panel'},
-    {label:'Console', sel:'.console-panel'},
-    {label:'Plugins', sel:'.plugin-panel'},
-    {label:'Export JS', sel:'.export-panel'}
-  ];
-  tabs.forEach(t => {
-    const b = document.createElement('button'); b.className='icon-btn'; b.textContent = t.label;
-    b.onclick = ()=> showRightTab(t.sel);
-    tabBar.appendChild(b);
-  });
-  sidebar.insertBefore(tabBar, sidebar.firstChild);
-  showRightTab('.prop-panel');
-}
-function showRightTab(selector){
-  const panels = document.querySelectorAll('#sidebar-right .panel');
-  panels.forEach(p => p.style.display = p.matches(selector) ? 'flex' : 'none');
-}
-initRightTabs();
+  function createTempLink() { const p = createNS('path', 'connection-path'); p.id = 'temp-link'; p.style.pointerEvents = 'none'; p.style.strokeDasharray = '5'; refs.svg.appendChild(p); }
+  function updateTempLink(mx, my) {
+    const p = byId('temp-link'); if (!p) return;
+    const n = state.nodes[interact.dragData.node];
+    const el = byId(n.id);
+    const port = el.querySelector(`[data-port="${interact.dragData.port}"][data-side="out"]`);
+    if (!port) return;
+    const r1 = port.getBoundingClientRect();
+    const view = refs.viewport.getBoundingClientRect();
+    const z = state.cam.z;
+    const x1 = (r1.left + r1.width / 2 - view.left - state.cam.x) / z;
+    const y1 = (r1.top + r1.height / 2 - view.top - state.cam.y) / z;
+    const x2 = (mx - view.left - state.cam.x) / z;
+    const y2 = (my - view.top - state.cam.y) / z;
+    const d = Math.abs(x1 - x2) * 0.5;
+    p.setAttribute('d', `M ${x1} ${y1} C ${x1 + d} ${y1} ${x2 - d} ${y2} ${x2} ${y2}`);
+  }
 
-// --- PLUGIN MANAGER & DOCS (modal-based) ---
-function renderPlugins(){
-  if(!DOM.pluginsList) return;
-  DOM.pluginsList.innerHTML = '';
-  Object.keys(STATE.plugins).forEach(id => {
-    const p = STATE.plugins[id];
-    const el = document.createElement('div'); el.style.display='flex'; el.style.justifyContent='space-between'; el.style.alignItems='center'; el.style.marginBottom='6px';
-    el.innerHTML = `<div><strong>${p.name||id}</strong><div style="font-size:12px;color:var(--text-dim)">${id}</div></div>`;
-    const btns = document.createElement('div');
-    const initBtn = document.createElement('button'); initBtn.className='icon-btn'; initBtn.title='Init'; initBtn.innerHTML = '<i class="material-icons">play_arrow</i>';
-    initBtn.onclick = ()=> initPlugin(id);
-    const removeBtn = document.createElement('button'); removeBtn.className='icon-btn'; removeBtn.title='Remove'; removeBtn.innerHTML = '<i class="material-icons">delete</i>';
-    removeBtn.onclick = ()=> { delete STATE.plugins[id]; renderPlugins(); initPalette(); saveToStorageDebounced(); };
-    btns.appendChild(initBtn); btns.appendChild(removeBtn); el.appendChild(btns);
-    DOM.pluginsList.appendChild(el);
-  });
-}
+  function addConnection(n1, p1, n2, p2) {
+    if (n1 === n2) return;
+    const dup = state.connections.find(c => c.to.node === n2 && c.to.port === p2);
+    if (dup) removeConnection(dup.id);
+    state.connections.push({ id: uid(), from: { node: n1, port: p1 }, to: { node: n2, port: p2 } });
+    renderConnections();
+  }
+  function removeConnection(id) { state.connections = state.connections.filter(c => c.id !== id); renderConnections(); }
 
-function openPluginManager(){
-  const html = `
-    <p>Installed plugins:</p>
-    <div id="plugin-list-inner" style="margin-bottom:10px;"></div>
-    <p>Paste plugin JS below and click <strong>Install</strong>. Plugin should call registerNode(...) or return an object with init().</p>
-    <textarea id="plugin-code" style="width:100%;height:180px;background:#0f0f12;color:#eee;padding:8px;border-radius:6px;border:1px solid #222;"></textarea>
-    <div style="display:flex;gap:8px;margin-top:8px;">
-      <input id="plugin-id" placeholder="plugin-id (optional)" style="flex:1;padding:6px" />
-      <input id="plugin-name" placeholder="plugin name (optional)" style="flex:1;padding:6px" />
-    </div>
-    <div style="display:flex;gap:8px;margin-top:8px;">
-      <button id="install-plugin" class="primary">Install</button>
-      <button id="init-all-plugins">Init All</button>
-    </div>
-  `;
-  openModal('Plugin Manager', html);
-  renderPlugins();
-  document.getElementById('install-plugin').onclick = ()=> {
-    const code = document.getElementById('plugin-code').value.trim();
-    if(!code){ alert('Paste plugin JS'); return; }
-    const id = document.getElementById('plugin-id').value.trim() || 'p_' + Date.now();
-    const name = document.getElementById('plugin-name').value.trim() || id;
-    STATE.plugins[id] = { id, name, code };
-    try {
-      const fn = new Function('registerNode','registerPlugin','state','log', code);
-      const res = fn(registerNode, registerPlugin, STATE, (m)=>log('[plugin] '+m,'info'));
-      if(res && typeof res.init === 'function'){ try{ res.init(registerNode, registerPlugin, STATE, (m)=>log('[plugin:init] '+m,'info')); } catch(e){ log('Plugin init error: '+(e?.message||e),'error'); } }
-      renderPlugins(); initPalette(); saveToStorageDebounced(); log('Plugin installed: '+name,'info');
-    } catch(e){ log('Plugin error: '+(e?.message||e),'error'); alert('Plugin error: '+(e?.message||e)); }
-  };
-  document.getElementById('init-all-plugins').onclick = ()=> { Object.keys(STATE.plugins).forEach(k=> initPlugin(k)); };
-}
-if(DOM.pluginBtn) DOM.pluginBtn.onclick = openPluginManager;
+  // --- PROPERTY PANEL ---
+  function refreshSelection() {
+    document.querySelectorAll('.node').forEach(e => e.classList.remove('selected'));
+    state.selected.forEach(id => byId(id)?.classList.add('selected'));
 
-function initPlugin(id){
-  const p = STATE.plugins[id];
-  if(!p) { log('Plugin not found: '+id,'warn'); return; }
-  if(p.code){
-    try {
-      const fn = new Function('registerNode','registerPlugin','state','log', p.code);
-      const res = fn(registerNode, registerPlugin, STATE, (m)=>log('[plugin] '+m,'info'));
-      if(res && typeof res.init === 'function') res.init(registerNode, registerPlugin, STATE, (m)=>log('[plugin:init] '+m,'info'));
-      initPalette(); renderPlugins(); saveToStorageDebounced(); log('Plugin init executed: '+(p.name||id),'info');
-    } catch(e){ log('Plugin init error: '+(e?.message||e),'error'); }
-  } else if(typeof p.init === 'function'){ try{ p.init(registerNode, registerPlugin, STATE, (m)=>log('[plugin:init] '+m,'info')); }catch(e){ log('Plugin init error: '+(e?.message||e),'error'); } }
-}
-
-function docsHtml(){
-  return `<h3>Plugin API & How to make plugins</h3>
-    <p>Use <code>registerNode(type, category, name, inputs, outputs, execFunc)</code>. registerNode will automatically add exec input & output to nodes.</p>
-    <p>Inputs/outputs example: <code>{id:'value', type:'number', val:0}</code>. Types: exec, number, string, boolean, array, object, any.</p>
-    <p>execFunc receives <code>ctx</code> with: <code>node</code>, <code>input(name)</code>, <code>eval(portName)</code>, <code>trigger(outPort)</code>, <code>setTempOutput(port,val)</code>.</p>
-    <pre style="background:#111;padding:8px;border-radius:6px;color:#9ef">
-(function(registerNode, registerPlugin, state, log){
-  registerNode('plugin.say','Plugins','Say Hello', [{id:'exec',type:'exec'},{id:'name',type:'string',val:'You'}], [{id:'exec',type:'exec'}], async (ctx)=>{
-    const n = await ctx.eval('name');
-    log('Hello '+n);
-    return 'exec';
-  });
-  return { init(){ registerPlugin('hello','Hello Plugin'); } };
-});
-    </pre>
-    <p><strong>Security:</strong> plugins run JS in your page. Only install trusted plugins.</p>`;
-}
-if(DOM.docsBtn) DOM.docsBtn.onclick = ()=> openModal('Docs', docsHtml());
-
-// modal helpers
-if(document.getElementById('modal-close')) document.getElementById('modal-close').onclick = closeModal;
-if(document.getElementById('modal-backdrop')) document.getElementById('modal-backdrop').onclick = closeModal;
-function openModal(title, html){ if(DOM.modalTitle) DOM.modalTitle.textContent = title; if(DOM.modalBody) DOM.modalBody.innerHTML = html; if(DOM.modal) DOM.modal.classList.remove('hidden'); if(DOM.modalBackdrop) DOM.modalBackdrop.classList.remove('hidden'); }
-function closeModal(){ if(DOM.modal) DOM.modal.classList.add('hidden'); if(DOM.modalBackdrop) DOM.modalBackdrop.classList.add('hidden'); }
-
-// helper: run custom script for node - reuse earlier
-async function runCustomScriptForNode(nodeId){ const node = STATE.nodes[nodeId]; if(!node || !node._customScript){ log('No custom script','warn'); return; } try { const fn = new Function('ctx','state','log','return ('+node._customScript+')(ctx,state,log);'); await fn({node, input: n=>node.inputs[n], eval: async ()=>null}, STATE, (m)=>{ log('[node-script] '+m,'info'); forwardToRunWindow('info','[node-script] '+m); }); log('Custom script run ok','info'); } catch(e){ log('Custom script error: '+(e?.message||e),'error'); forwardToRunWindow('error','Custom script error: '+(e?.message||e)); } }
-
-// canvas info
-function updateCanvasInfo(){
-  const coordsEl = DOM.coordsInd;
-  if(!coordsEl) return;
-  if(STATE.selection.length === 0){ coordsEl.textContent = '0, 0'; return; }
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  STATE.selection.forEach(id => {
-    const n = STATE.nodes[id];
-    if(!n) return;
-    const el = document.getElementById(id);
-    if(!el) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x); maxY = Math.max(maxY, n.y); }
-    else {
-      const style = el.style.transform;
-      const m = style.match(/translate\(([-0-9.]+)px,\s*([-0-9.]+)px\)/);
-      if(m){ const x = parseFloat(m[1]), y = parseFloat(m[2]); minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); } else { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x); maxY = Math.max(maxY, n.y); }
+    refs.props.innerHTML = '';
+    if (state.selected.size !== 1) {
+      refs.props.innerHTML = '<div class="empty-msg">Select one node</div>';
+      return;
     }
+
+    const n = state.nodes[[...state.selected][0]];
+    const addProp = (lbl, el) => {
+      const d = create('div', 'prop-group');
+      d.innerHTML = `<label class="prop-label">${lbl}</label>`;
+      d.appendChild(el);
+      refs.props.appendChild(d);
+    };
+
+    // Title
+    const title = create('div'); title.textContent = n.title; title.style.fontWeight = 'bold';
+    refs.props.appendChild(title);
+
+    // Inputs
+    (n.inputs || []).forEach(i => {
+      if (i.type === 'exec') return;
+      const inp = create('input', 'prop-input');
+      inp.value = i.value;
+      inp.oninput = () => { i.value = inp.value; saveState(); };
+      addProp(`Input: ${i.name}`, inp);
+    });
+
+    // Fields
+    (n.fields || []).forEach(f => {
+      const inp = create('input', 'prop-input');
+      if (f.type === 'number') inp.type = 'number';
+      if (f.type === 'color') { inp.type = 'color'; inp.style.height = '30px'; }
+      inp.value = f.value;
+      inp.oninput = () => { f.value = inp.value; saveState(); };
+      addProp(f.name, inp);
+    });
+  }
+
+  // --- SETTINGS & MODALS ---
+  byId('settingsBtn').onclick = () => {
+    refs.modalTitle.textContent = 'Settings';
+    refs.modalBody.innerHTML = `
+            <div class="setting-row"><span>Theme</span> <select id="set-theme"><option value="theme-cyber">Cyber</option><option value="theme-dark">Dark</option><option value="theme-light">Light</option></select></div>
+            <div class="setting-row"><span>Grid Snap (20px)</span> <input type="checkbox" id="set-snap" ${state.settings.gridSnap ? 'checked' : ''}></div>
+            <div style="margin-top:20px; border-top:1px solid #333; padding-top:10px">
+                <button class="danger-btn" id="full-reset-btn" style="width:100%;justify-content:center"><i class="material-icons">warning</i> Full Factory Reset</button>
+            </div>
+        `;
+    byId('set-theme').value = state.settings.theme;
+
+    const save = () => {
+      state.settings.theme = byId('set-theme').value;
+      state.settings.gridSnap = byId('set-snap').checked;
+      document.body.className = state.settings.theme;
+      saveState();
+      closeModal();
+    };
+
+    byId('full-reset-btn').onclick = () => {
+      if (confirm("Are you sure? This deletes ALL saves.")) {
+        localStorage.clear();
+        location.reload();
+      }
+    };
+
+    showModal('Save', save);
+  };
+
+  function showModal(actionText, actionFn) {
+    refs.modal.classList.remove('hidden');
+    refs.backdrop.classList.remove('hidden');
+    if (actionText) {
+      refs.modalBtn.textContent = actionText;
+      refs.modalBtn.onclick = actionFn;
+      refs.modalBtn.classList.remove('hidden');
+    } else refs.modalBtn.classList.add('hidden');
+  }
+  function closeModal() {
+    refs.modal.classList.add('hidden');
+    refs.backdrop.classList.add('hidden');
+  }
+  byId('modal-close').onclick = closeModal;
+  byId('modal-backdrop').onclick = closeModal;
+
+  // --- INIT ---
+  function initPalette() {
+    refs.palette.innerHTML = '';
+    const cats = {};
+    const term = refs.search.value.toLowerCase();
+    state.nodeDefs.forEach(d => {
+      if (term && !d.title.toLowerCase().includes(term)) return;
+      if (!cats[d.category]) cats[d.category] = [];
+      cats[d.category].push(d);
+    });
+    Object.keys(cats).forEach(c => {
+      const h = create('div', 'category-header'); h.textContent = c; refs.palette.appendChild(h);
+      cats[c].forEach(d => {
+        const b = create('div', 'palette-block');
+        b.innerHTML = `<span>${d.title}</span>`;
+        b.draggable = true;
+        b.ondragstart = e => e.dataTransfer.setData('type', d.type);
+        refs.palette.appendChild(b);
+      });
+    });
+  }
+  refs.search.oninput = initPalette;
+
+  // Drag Drop Create
+  refs.viewport.ondragover = e => e.preventDefault();
+  refs.viewport.ondrop = e => {
+    e.preventDefault();
+    const type = e.dataTransfer.getData('type');
+    if (type) {
+      const rect = refs.viewport.getBoundingClientRect();
+      const z = state.cam.z;
+      const x = (e.clientX - rect.left - state.cam.x) / z;
+      const y = (e.clientY - rect.top - state.cam.y) / z;
+      const def = state.nodeDefs.find(d => d.type === type);
+      if (def) { createNode(def, x, y); saveState(); }
+    }
+  };
+
+  // Save/Load
+  function saveState() {
+    const s = { ...state, nodes: Object.values(state.nodes).map(n => ({ ...n, def: undefined })) };
+    localStorage.setItem(LS_KEY, JSON.stringify(s));
+  }
+  function loadState() {
+    const d = JSON.parse(localStorage.getItem(LS_KEY));
+    if (d) {
+      state.nextId = d.nextId; state.cam = d.cam || state.cam; state.connections = d.connections;
+      state.settings = d.settings || state.settings;
+      document.body.className = state.settings.theme;
+      d.nodes.forEach(n => {
+        const def = state.nodeDefs.find(x => x.type === n.type);
+        if (def) { createNode(def, n.x, n.y); Object.assign(state.nodes[n.id], n); }
+      });
+      renderConnections();
+      byId('zoom-indicator').textContent = Math.round(state.cam.z * 100) + '%';
+      byId('coords-indicator').textContent = `${Math.round(state.cam.x)},${Math.round(state.cam.y)}`;
+      refs.canvas.style.transform = `translate(${state.cam.x}px, ${state.cam.y}px) scale(${state.cam.z})`;
+    }
+  }
+
+  // Zoom
+  function updateCam() {
+    refs.canvas.style.transform = `translate(${state.cam.x}px, ${state.cam.y}px) scale(${state.cam.z})`;
+    byId('zoom-indicator').textContent = Math.round(state.cam.z * 100) + '%';
+    byId('coords-indicator').textContent = `${Math.round(state.cam.x)},${Math.round(state.cam.y)}`;
+  }
+  refs.viewport.addEventListener('wheel', e => {
+    e.preventDefault();
+    const d = e.deltaY < 0 ? 1.1 : 0.9;
+    state.cam.z *= d;
+    updateCam();
   });
-  if(minX === Infinity){ coordsEl.textContent = '0, 0'; return; }
-  const cx = Math.round((minX + maxX)/2), cy = Math.round((minY + maxY)/2);
-  coordsEl.textContent = `${cx}, ${cy}`;
-}
 
-// --- Initialization & autoload/autosave ---
-initPalette();
-updateTransform();
-renderPlugins();
-updateVarPanel();
-updateConnections();
-updateCanvasInfo();
+  // Run
+  byId('runBtn').onclick = () => {
+    // Simple code builder
+    const starts = Object.values(state.nodes).filter(n => n.type === 'e.start');
+    const ticks = Object.values(state.nodes).filter(n => n.type === 'e.tick');
 
-// Load from storage if available, else add starter nodes
-const had = loadFromStorage();
-if(!had && Object.keys(STATE.nodes).length === 0){
-  const s = addNode('evt.start', 80, 60);
-  const l = addNode('console.log', 300, 80);
-  STATE.nodes[l].inputs['msg'] = 'Hello world';
-  STATE.connections.push({ from: s, fromPort: 'exec', to: l, toPort: 'exec' });
-  updateConnections();
-  saveToStorageDebounced();
-}
+    // Helper to recursively build code
+    const build = (nid) => {
+      const n = state.nodes[nid];
+      if (!n) return '';
+      const gIn = (inst, port) => {
+        const c = state.connections.find(x => x.to.node === inst.id && x.to.port === port);
+        if (c) {
+          // Check if src is data or flow. If flow, we can't inline it.
+          const src = state.nodes[c.from.node];
+          if (src.def.outputs[0].type !== 'exec') return build(src.id);
+        }
+        const iv = inst.inputs.find(i => i.name === port)?.value;
+        return isNaN(iv) ? `"${iv}"` : iv;
+      };
+      const f = n.fields.reduce((acc, k) => { acc[k.name] = k.value; return acc }, {});
+      let code = n.def.build(n, (inst, p) => gIn(inst, p), f);
 
-// autosave on unload
-window.addEventListener('beforeunload', ()=> saveToStorage());
+      // Handle exec flow
+      n.outputs.forEach(o => {
+        if (o.type === 'exec') {
+          const c = state.connections.find(x => x.from.node === nid && x.from.port === o.name);
+          code = code.replace(`{{EXEC_${o.name}}}`, c ? build(c.to.node) : '');
+        }
+      });
+      return code;
+    };
 
-// expose helpers
-window.STATE = STATE;
-window.registerNode = registerNode;
-window.registerPlugin = registerPlugin;
-window.generateJS = generateJS;
-window.nodeToJS = nodeToJS;
-window.log = (m,t='info') => log(m,t);
+    let js = `const canvas=document.getElementById('g');const ctx=canvas.getContext('2d');const STATE={};`;
+    starts.forEach(n => js += build(n.id) + ';');
+    js += `function loop(){ requestAnimationFrame(loop);`;
+    ticks.forEach(n => js += build(n.id) + ';');
+    js += `} loop();`;
 
-// bind run/stop/step
-if(DOM.runBtn) DOM.runBtn.onclick = ()=> runEngine(true, false);
-if(DOM.runEditorBtn) DOM.runEditorBtn.onclick = ()=> runEngine(false, true);
-if(DOM.stepBtn) DOM.stepBtn.onclick = stepOnce;
-if(DOM.stopBtn) DOM.stopBtn.onclick = stopEngine;
+    const html = `<html><body style="margin:0;background:#000"><canvas id="g" width="800" height="600"></canvas><script>${js}<\/script></body></html>`;
+    const b = new Blob([html], { type: 'text/html' });
+    window.open(URL.createObjectURL(b));
+  };
+
+  // Actions
+  byId('saveBtn').onclick = saveState;
+  byId('loadBtn').onclick = loadState;
+  byId('clearBtn').onclick = () => { if (confirm('Clear?')) { state.nodes = {}; state.connections = []; refs.canvas.innerHTML = '<svg id="connections"></svg>'; saveState(); } };
+
+  // Start
+  initPalette();
+  setTimeout(loadState, 50);
+
+})();

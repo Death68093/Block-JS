@@ -1,142 +1,92 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>LogicBuilder Titan — Pro</title>
+  <title>LogicBuilder Ultimate</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="stylesheet" href="style.css" />
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
-  <style>
-    /* small style adapt for comment blocks (non-invasive) */
-    .node.comment { background: rgba(255,255,255,0.03); border: 1px dashed rgba(200,200,200,0.08); border-radius: 6px; min-width:120px; min-height:60px; }
-    .comment-title { padding:6px 8px; color:var(--text-dim); cursor:move; user-select:none; }
-    .comment-resize { position:absolute; right:6px; bottom:6px; width:12px; height:12px; cursor:se-resize; background:rgba(255,255,255,0.06); border-radius:3px; }
-  </style>
 </head>
-<body class="dark">
+<body class="theme-cyber">
 
   <header id="topbar">
-    <div class="brand">
-      <i class="material-icons">schema</i>
-      <strong>TITAN</strong><span>Logic Engine</span>
+    <div class="brand-left">
+      <i class="material-icons logo">hub</i>
+      <div class="brand-text">
+        <strong>LogicBuilder</strong>
+        <span class="muted">Ultimate</span>
+      </div>
+      <nav id="main-nav">
+        <button id="settingsBtn"><i class="material-icons">settings</i> Settings</button>
+        <button id="docsBtn"><i class="material-icons">menu_book</i> Docs</button>
+      </nav>
     </div>
-    <div id="controls">
-      <div class="control-group">
-        <button id="runBtn" class="primary"><i class="material-icons">play_arrow</i> Run</button>
-        <button id="runEditorBtn" title="Run inside editor"><i class="material-icons">play_circle</i> Run in Editor</button>
-        <button id="stepBtn"><i class="material-icons">redo</i> Step</button>
-        <button id="stopBtn" class="danger"><i class="material-icons">stop</i> Stop</button>
+
+    <div class="brand-right">
+      <div class="actions">
+        <button id="runBtn" class="primary-btn" title="Run Game"><i class="material-icons">play_arrow</i> PLAY</button>
       </div>
-      <span class="divider"></span>
-      <div class="control-group">
-        <button id="saveBtn"><i class="material-icons">save</i> Save</button>
-        <button id="loadBtn"><i class="material-icons">folder_open</i> Load</button>
-        <button id="clearBtn"><i class="material-icons">delete_sweep</i> Clear</button>
+      <div class="separator"></div>
+      <div class="file-actions">
+        <button id="saveBtn" title="Save Project"><i class="material-icons">save</i></button>
+        <button id="loadBtn" title="Load Project"><i class="material-icons">folder_open</i></button>
+        <button id="clearBtn" title="Clear Canvas"><i class="material-icons">delete_sweep</i></button>
       </div>
-      <span class="divider"></span>
-      <div class="control-group">
-        <button id="pluginBtn" title="Plugin Manager"><i class="material-icons">extension</i></button>
-        <button id="docsBtn" title="Docs"><i class="material-icons">menu_book</i></button>
-      </div>
-      <span class="divider"></span>
-      <button id="themeBtn" title="Toggle Theme"><i class="material-icons">dark_mode</i></button>
     </div>
   </header>
 
   <div id="editor-container">
-    
     <aside id="block-palette">
       <div class="search-box">
         <i class="material-icons">search</i>
-        <input type="text" id="paletteSearch" placeholder="Search components...">
+        <input id="paletteSearch" placeholder="Search 60+ nodes..." />
       </div>
-      <div class="palette-scroll" id="paletteContent"></div>
+      <div id="paletteContent" class="palette-scroll"></div>
     </aside>
 
     <main id="workspace">
-      <div id="canvas-info">
-        <span id="zoom-indicator">100%</span>
-        <span id="coords-indicator">0, 0</span>
-      </div>
-
       <div id="canvas-viewport">
         <div id="canvasInner">
           <svg id="connections"></svg>
         </div>
       </div>
+      <div id="canvas-info">
+        <span id="zoom-indicator">100%</span> | <span id="coords-indicator">0, 0</span>
+      </div>
     </main>
 
     <aside id="sidebar-right">
-      
-      <section class="panel prop-panel">
+      <div class="panel" id="panel-props" data-id="props">
         <div class="panel-header">
-          <h3>Properties</h3>
-          <i class="material-icons">tune</i>
+          <i class="material-icons">tune</i> PROPERTIES
         </div>
-        <div id="properties-content">
-          <p class="empty-msg">Select a node to edit properties.</p>
+        <div class="panel-body" id="properties-content">
+          <div class="empty-msg">Select a node to edit</div>
         </div>
-      </section>
+      </div>
 
-      <section class="panel var-panel">
+      <div class="panel" id="panel-console" data-id="console" style="flex:1;">
         <div class="panel-header">
-          <h3>Variables</h3>
-          <button id="addVarBtn" class="icon-btn"><i class="material-icons">add</i></button>
+            <i class="material-icons">terminal</i> CONSOLE
+            <button id="clearLogBtn" style="float:right; border:none; background:none; cursor:pointer; opacity:0.5"><i class="material-icons" style="font-size:14px">block</i></button>
         </div>
-        <div id="variables-list"></div>
-      </section>
-
-      <section class="panel console-panel">
-        <div class="panel-header">
-          <h3>Execution Log</h3>
-          <div>
-            <button id="clearLogBtn" class="icon-btn"><i class="material-icons">block</i></button>
-            <button id="openRunWindowBtn" class="icon-btn" title="Open Run Window"><i class="material-icons">open_in_new</i></button>
-          </div>
-        </div>
-        <div id="console-output"></div>
-      </section>
-
-      <!-- Export JS Panel (built-in feature) -->
-      <section class="panel export-panel" style="display:none; flex-direction: column; gap:6px; padding:6px;">
-        <div class="panel-header">
-          <h3>Export JS</h3>
-          <i class="material-icons">code</i>
-        </div>
-        <div style="padding:8px;">
-          <button id="export-js-btn" class="primary">Generate & Copy JS</button>
-          <button id="export-js-preview-btn" class="icon-btn" title="Preview in modal" style="margin-left:8px"><i class="material-icons">open_in_full</i></button>
-        </div>
-        <textarea id="export-js-textarea" style="width:100%; height:200px; background:#0f0f12; color:#eee; border:1px solid #222; border-radius:4px; padding:4px;" placeholder="Generated JS will appear here..."></textarea>
-      </section>
-
-      <section class="panel plugin-panel">
-        <div class="panel-header">
-          <h3>Plugins</h3>
-          <div>
-            <button id="addPluginBtn" class="icon-btn" title="Add Plugin"><i class="material-icons">add</i></button>
-          </div>
-        </div>
-        <div id="plugins-list" style="padding:10px; overflow-y:auto;"></div>
-      </section>
-
+        <div class="panel-body" id="console-output"></div>
+      </div>
     </aside>
   </div>
 
-  <input type="file" id="fileInput" accept=".json" style="display:none" />
-
-  <div id="context-menu" class="hidden"></div>
-
-  <!-- Docs / Plugin Modal -->
   <div id="modal-backdrop" class="hidden"></div>
   <div id="modal" class="hidden">
     <div id="modal-header">
-      <span id="modal-title">Docs</span>
+      <span id="modal-title">Title</span>
       <button id="modal-close" class="icon-btn"><i class="material-icons">close</i></button>
     </div>
-    <div id="modal-body" style="padding:12px; max-height:60vh; overflow:auto; font-size:13px;"></div>
+    <div id="modal-body"></div>
+    <div id="modal-footer">
+        <button id="modal-action-btn" class="primary-btn hidden">Action</button>
+    </div>
   </div>
 
-  <script src="script.js" defer></script>
+  <script src="script.js"></script>
 </body>
 </html>
